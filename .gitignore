@@ -1,3 +1,9 @@
+# Node / Electron
+node_modules/
+dist/
+dist-electron/
+*.local
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
