@@ -38,3 +38,13 @@ body {
 .titlebar-drag a {
   -webkit-app-region: no-drag;
 }
+
+@keyframes scan {
+  0% { transform: translateY(0); }
+  50% { transform: translateY(400px); opacity: 0.5; }
+  100% { transform: translateY(0); }
+}
+
+.animate-scan {
+  animation: scan 4s linear infinite;
+}

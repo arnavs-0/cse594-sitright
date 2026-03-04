@@ -2,7 +2,9 @@ import PostureIndicator from './PostureIndicator'
 import SessionStats from './SessionStats'
 import PostureTimeline from './PostureTimeline'
 import AlertHistory from './AlertHistory'
+import CameraFeed from './CameraFeed'
 import { PostureStatus, PostureAlert, PostureSnapshot } from '../types'
+import { useSettings } from '../hooks/useSettings'
 
 interface DashboardProps {
   posture: {
@@ -13,20 +15,33 @@ interface DashboardProps {
     timeline: PostureSnapshot[]
     isMonitoring: boolean
     sessionStart: Date
+    recalibrate: () => void
   }
+  setVideo: (video: HTMLVideoElement | null) => void
 }
 
-export default function Dashboard({ posture }: DashboardProps) {
+export default function Dashboard({ posture, setVideo }: DashboardProps) {
+  const { settings, update } = useSettings()
+
   return (
     <div className="space-y-6">
-      {/* Top row — posture ring + stat cards */}
+      {/* Top row — posture ring + camera feed + stat cards */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1">
+        <div className="lg:col-span-1 space-y-6">
           <PostureIndicator
             status={posture.status}
             score={posture.score}
             confidence={posture.confidence}
             isMonitoring={posture.isMonitoring}
+          />
+          <CameraFeed 
+            onVideoRef={setVideo} 
+            isMonitoring={posture.isMonitoring} 
+            status={posture.status}
+            score={posture.score}
+            selectedDeviceId={settings.deviceId}
+            onDeviceChange={(id) => update('deviceId', id)}
+            onRecalibrate={posture.recalibrate}
           />
         </div>
         <div className="lg:col-span-2">

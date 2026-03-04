@@ -8,6 +8,7 @@ const defaults: AppSettings = {
   soundEnabled: true,
   startMinimized: false,
   showInMenuBar: true,
+  deviceId: '',
 }
 
 interface SettingsContextValue {

@@ -21,7 +21,7 @@ function AppInner() {
       postureStatus={posture.status}
     >
       {currentPage === 'dashboard' ? (
-        <Dashboard posture={posture} />
+        <Dashboard posture={posture} setVideo={posture.setVideo} />
       ) : (
         <Settings />
       )}

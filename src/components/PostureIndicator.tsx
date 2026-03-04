@@ -7,24 +7,27 @@ interface Props {
   isMonitoring: boolean
 }
 
-const cfg: Record<PostureStatus, { color: string; ring: string; label: string; glow: string }> = {
+const cfg: Record<PostureStatus, { color: string; ring: string; label: string; glow: string; border: string }> = {
   good: {
     color: 'text-emerald-400',
     ring: 'stroke-emerald-500',
     label: 'Good Posture',
     glow: 'shadow-emerald-500/20',
+    border: 'border-emerald-500/50',
   },
   warning: {
     color: 'text-amber-400',
     ring: 'stroke-amber-500',
     label: 'Needs Adjustment',
     glow: 'shadow-amber-500/20',
+    border: 'border-amber-500/50',
   },
   bad: {
     color: 'text-red-400',
     ring: 'stroke-red-500',
     label: 'Poor Posture',
     glow: 'shadow-red-500/20',
+    border: 'border-red-500/50',
   },
 }
 
@@ -35,7 +38,9 @@ export default function PostureIndicator({ status, score, confidence, isMonitori
 
   return (
     <div
-      className={`bg-slate-800/50 border border-slate-700/50 rounded-2xl p-6 flex flex-col items-center justify-center shadow-lg ${c.glow} transition-shadow duration-1000 h-full`}
+      className={`bg-slate-800/50 border-2 rounded-2xl p-6 flex flex-col items-center justify-center shadow-lg transition-all duration-500 h-full ${
+        isMonitoring ? `${c.border} ${c.glow}` : 'border-slate-700/50 shadow-none'
+      }`}
     >
       {/* SVG ring */}
       <div className="relative w-36 h-36 mb-4">

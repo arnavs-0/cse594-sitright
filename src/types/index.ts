@@ -26,6 +26,7 @@ export interface AppSettings {
   soundEnabled: boolean
   startMinimized: boolean
   showInMenuBar: boolean
+  deviceId?: string
 }
 
 /* Electron preload bridge */

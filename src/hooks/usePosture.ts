@@ -1,16 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { PoseLandmarker, FilesetResolver, PoseLandmarkerResult } from '@mediapipe/tasks-vision'
 import { PostureStatus, PostureAlert, PostureSnapshot, AlertMode } from '../types'
-
-/* ============================================================
-   INTEGRATION POINT FOR POSTURE TRACKING
-   ============================================================
-   This hook currently uses **simulated** posture data so the UI
-   can be demonstrated independently of the CV model.
-
-   To connect real posture detection, replace the `simulatePosture`
-   callback with data from your detection pipeline.  The rest of
-   the UI consumes the return value of this hook unchanged.
-   ============================================================ */
 
 const POSTURE_MESSAGES: Record<PostureStatus, string[]> = {
   good: ['Great posture!', 'Looking good!', 'Keep it up!'],
@@ -35,131 +25,205 @@ function randomMsg(status: PostureStatus): string {
 export function usePosture(alertMode: AlertMode = 'overlay') {
   const [isMonitoring, setIsMonitoring] = useState(true)
   const [status, setStatus] = useState<PostureStatus>('good')
-  const [score, setScore] = useState(92)
-  const [confidence, setConfidence] = useState(95)
+  const [score, setScore] = useState(100)
+  const [confidence, setConfidence] = useState(0)
   const [alerts, setAlerts] = useState<PostureAlert[]>([])
   const [timeline, setTimeline] = useState<PostureSnapshot[]>([])
   const [sessionStart] = useState<Date>(new Date())
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const landmarkerRef = useRef<PoseLandmarker | null>(null)
+  const lastVideoTimeRef = useRef(-1)
+  const requestRef = useRef<number>()
+  const baselineRef = useRef<number | null>(null)
+  const lastAlertTimeRef = useRef(0)
+  const lastReportedStatusRef = useRef<PostureStatus>('good')
 
-  /* ---- simulated posture updates (REPLACE WITH REAL DETECTION) ---- */
-  const simulatePosture = useCallback(() => {
-    if (!isMonitoring) return
+  /* ---- ASYMMETRIC SMOOTHING STATE ---- */
+  const statusHistoryRef = useRef<PostureStatus[]>([])
+  const smoothedScoreRef = useRef(100)
+  const BUFFER_SIZE = 10 // Rolling window for "clearing" alerts
 
-    // Weighted random: 60 % good · 25 % warning · 15 % bad
-    const rand = Math.random()
-    let newStatus: PostureStatus
-    let newScore: number
+  // Initialize MediaPipe
+  useEffect(() => {
+    async function initMediaPipe() {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          "/wasm"
+        )
+        const poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "/models/pose_landmarker_lite.task",
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numPoses: 1
+        })
+        landmarkerRef.current = poseLandmarker
+      } catch (err) {
+        console.error('Failed to initialize MediaPipe:', err)
+      }
+    }
+    initMediaPipe()
+    
+    return () => {
+      if (requestRef.current) cancelAnimationFrame(requestRef.current)
+      landmarkerRef.current?.close()
+    }
+  }, [])
 
-    if (rand < 0.6) {
-      newStatus = 'good'
-      newScore = 75 + Math.floor(Math.random() * 25)
-    } else if (rand < 0.85) {
-      newStatus = 'warning'
-      newScore = 45 + Math.floor(Math.random() * 30)
-    } else {
-      newStatus = 'bad'
-      newScore = 10 + Math.floor(Math.random() * 35)
+  const recalibrate = useCallback(() => {
+    baselineRef.current = null
+    statusHistoryRef.current = []
+    smoothedScoreRef.current = 100
+    console.log('Recalibrating baseline...')
+  }, [])
+
+  const processResult = useCallback((result: PoseLandmarkerResult) => {
+    if (!result.landmarks || result.landmarks.length === 0) {
+      if (confidence !== 0) setConfidence(0)
+      return
     }
 
-    const newConfidence = 80 + Math.floor(Math.random() * 20)
-    setStatus(newStatus)
-    setScore(newScore)
-    setConfidence(newConfidence)
+    const landmarks = result.landmarks[0]
+    setConfidence(95)
 
-    // Timeline
-    setTimeline((prev) => [
-      ...prev.slice(-59),
-      { time: new Date(), status: newStatus, score: newScore },
-    ])
+    const nose = landmarks[0]
+    const leftShoulder = landmarks[11]
+    const rightShoulder = landmarks[12]
 
-    // Alerts for non-good posture
-    if (newStatus !== 'good') {
-      const alert: PostureAlert = {
-        id: Date.now().toString(),
-        timestamp: new Date(),
-        type: newStatus,
-        message: randomMsg(newStatus),
-      }
-      setAlerts((prev) => [alert, ...prev].slice(0, 50))
+    const shoulderMidpointY = (leftShoulder.y + rightShoulder.y) / 2
+    const shoulderWidth = Math.sqrt(
+      Math.pow(leftShoulder.x - rightShoulder.x, 2) +
+      Math.pow(leftShoulder.y - rightShoulder.y, 2)
+    )
 
-      // Screen-edge overlay glow (works even when app is minimized)
-      if (alertMode === 'overlay' || alertMode === 'both') {
-        window.electronAPI?.showOverlay(newStatus)
-      }
+    const currentMetric = (shoulderMidpointY - nose.y) / shoulderWidth
 
-      // Native desktop notification for bad posture
-      if (newStatus === 'bad' && window.electronAPI && (alertMode === 'banner' || alertMode === 'both')) {
-        window.electronAPI.sendNotification('SitRight — Posture Alert', alert.message)
-      }
-    } else {
-      // Good posture — hide the overlay
-      window.electronAPI?.hideOverlay()
+    if (baselineRef.current === null && currentMetric > 0) {
+      baselineRef.current = currentMetric
     }
-  }, [isMonitoring])
+
+    if (baselineRef.current) {
+      const ratio = currentMetric / baselineRef.current
+      
+      let rawStatus: PostureStatus = 'good'
+      let rawScore = Math.floor(ratio * 100)
+
+      // INCREASED SENSITIVITY THRESHOLDS
+      if (ratio < 0.75) {
+        rawStatus = 'bad'
+      } else if (ratio < 0.90) {
+        rawStatus = 'warning'
+      } else {
+        rawStatus = 'good'
+        rawScore = Math.min(100, rawScore)
+      }
+
+      /* ---- Faster Low-pass Filter on Score (30% weight to new) ---- */
+      smoothedScoreRef.current = (smoothedScoreRef.current * 0.7) + (rawScore * 0.3)
+      const finalScore = Math.round(smoothedScoreRef.current)
+      setScore(finalScore)
+
+      /* ---- Asymmetric Buffer Management ---- */
+      statusHistoryRef.current.push(rawStatus)
+      if (statusHistoryRef.current.length > BUFFER_SIZE) {
+        statusHistoryRef.current.shift()
+      }
+
+      // FAST TRIGGER LOGIC:
+      // If the last 3 frames are bad/warning, switch immediately.
+      const lastThree = statusHistoryRef.current.slice(-3)
+      const allBad = lastThree.length === 3 && lastThree.every(v => v === 'bad')
+      const allPoor = lastThree.length === 3 && lastThree.every(v => v === 'warning' || v === 'bad')
+
+      let newStatus: PostureStatus = status
+      
+      if (allBad) {
+        newStatus = 'bad'
+      } else if (allPoor && status !== 'bad') {
+        newStatus = 'warning'
+      } else if (statusHistoryRef.current.every(v => v === 'good')) {
+        // SLOW CLEAR: Only go back to good if the entire buffer is good
+        newStatus = 'good'
+      }
+
+      if (newStatus !== status) {
+        setStatus(newStatus)
+      }
+
+      // REACTIVE OVERLAY CONTROL
+      if (newStatus !== lastReportedStatusRef.current) {
+        if (newStatus === 'good') {
+          window.electronAPI?.hideOverlay()
+        } else if (alertMode === 'overlay' || alertMode === 'both') {
+          window.electronAPI?.showOverlay(newStatus)
+        }
+        lastReportedStatusRef.current = newStatus
+      }
+
+      // DEBOUNCED ALERTS
+      if (newStatus !== 'good') {
+        const now = Date.now()
+        if (now - lastAlertTimeRef.current > 15000) {
+          const alert: PostureAlert = {
+            id: now.toString(),
+            timestamp: new Date(),
+            type: newStatus,
+            message: randomMsg(newStatus),
+          }
+          setAlerts((prev) => [alert, ...prev].slice(0, 50))
+          lastAlertTimeRef.current = now
+
+          if (newStatus === 'bad' && window.electronAPI && (alertMode === 'banner' || alertMode === 'both')) {
+            window.electronAPI.sendNotification('SitRight — Posture Alert', alert.message)
+          }
+        }
+      }
+    }
+  }, [alertMode, confidence, status])
+
+  const detect = useCallback(() => {
+    if (videoRef.current && isMonitoring && landmarkerRef.current) {
+      const video = videoRef.current
+      if (video.readyState >= 2 && video.currentTime !== lastVideoTimeRef.current) {
+        lastVideoTimeRef.current = video.currentTime
+        try {
+          const startTimeMs = performance.now()
+          const result = landmarkerRef.current.detectForVideo(video, startTimeMs)
+          processResult(result)
+        } catch (err) {
+          console.error('Detection error:', err)
+        }
+      }
+    }
+    requestRef.current = requestAnimationFrame(detect)
+  }, [isMonitoring, processResult])
 
   useEffect(() => {
     if (isMonitoring) {
-      simulatePosture()
-      intervalRef.current = setInterval(simulatePosture, 8000)
-    } else if (intervalRef.current) {
-      clearInterval(intervalRef.current)
-      intervalRef.current = null
+      requestRef.current = requestAnimationFrame(detect)
+    } else {
+      if (requestRef.current) cancelAnimationFrame(requestRef.current)
+      window.electronAPI?.hideOverlay()
+      lastReportedStatusRef.current = 'good'
+      statusHistoryRef.current = []
     }
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current)
+      if (requestRef.current) cancelAnimationFrame(requestRef.current)
     }
-  }, [isMonitoring, simulatePosture])
+  }, [isMonitoring, detect])
 
-  const toggleMonitoring = useCallback(() => {
-    setIsMonitoring((p) => {
-      if (p) {
-        // Pausing — immediately hide overlay
-        window.electronAPI?.hideOverlay()
-      }
-      return !p
-    })
-  }, [])
-
-  /* ---- keyboard shortcuts for live demos (Cmd/Ctrl + 1/2/3) ---- */
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey)) return
-      if (e.key === '1') {
-        setStatus('good')
-        setScore(92)
-        setConfidence(97)
-        // Immediately clear the overlay
-        window.electronAPI?.hideOverlay()
-      } else if (e.key === '2') {
-        setStatus('warning')
-        setScore(55)
-        setConfidence(88)
-        if (alertMode === 'overlay' || alertMode === 'both') {
-          window.electronAPI?.showOverlay('warning')
-        }
-      } else if (e.key === '3') {
-        setStatus('bad')
-        setScore(25)
-        setConfidence(91)
-        const alert: PostureAlert = {
-          id: Date.now().toString(),
-          timestamp: new Date(),
-          type: 'bad',
-          message: 'Poor posture detected. Try this: ',
-        }
-        setAlerts((prev) => [alert, ...prev].slice(0, 50))
-        if (alertMode === 'overlay' || alertMode === 'both') {
-          window.electronAPI?.showOverlay('bad')
-        }
-        if (alertMode === 'banner' || alertMode === 'both') {
-          window.electronAPI?.sendNotification('SitRight — Posture Alert', alert.message)
-        }
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [alertMode])
+    const interval = setInterval(() => {
+      if (!isMonitoring) return
+      setTimeline((prev) => [
+        ...prev.slice(-59),
+        { time: new Date(), status, score },
+      ])
+    }, 10000)
+    return () => clearInterval(interval)
+  }, [isMonitoring, status, score])
 
   return {
     status,
@@ -169,6 +233,8 @@ export function usePosture(alertMode: AlertMode = 'overlay') {
     timeline,
     isMonitoring,
     sessionStart,
-    toggleMonitoring,
+    toggleMonitoring: () => setIsMonitoring(!isMonitoring),
+    setVideo: (video: HTMLVideoElement | null) => { videoRef.current = video },
+    recalibrate,
   }
 }
