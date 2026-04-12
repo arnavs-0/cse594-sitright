@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { PostureStatus } from '../types'
+import type { Landmark3D } from '../hooks/usePosture'
+import LandmarkOverlay from './LandmarkOverlay'
 
 interface CameraFeedProps {
   onVideoRef: (video: HTMLVideoElement | null) => void
@@ -9,6 +11,7 @@ interface CameraFeedProps {
   selectedDeviceId?: string
   onDeviceChange?: (deviceId: string) => void
   onRecalibrate: () => void
+  landmarks3D?: Landmark3D[]
 }
 
 const FEEDBACK_MESSAGES: Record<PostureStatus, string> = {
@@ -17,20 +20,24 @@ const FEEDBACK_MESSAGES: Record<PostureStatus, string> = {
   bad: 'Slouching detected! Sit up straight.',
 }
 
-export default function CameraFeed({ 
-  onVideoRef, 
-  isMonitoring, 
-  status, 
-  score, 
+export default function CameraFeed({
+  onVideoRef,
+  isMonitoring,
+  status,
+  score,
   selectedDeviceId,
   onDeviceChange,
-  onRecalibrate
+  onRecalibrate,
+  landmarks3D,
 }: CameraFeedProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [error, setError] = useState<string | null>(null)
   const [stream, setStream] = useState<MediaStream | null>(null)
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([])
   const [showDevicePicker, setShowDevicePicker] = useState(false)
+  // Intrinsic video dimensions. Populated on loadedmetadata and handed to the
+  // overlay as its viewBox so dot positions match object-cover cropping.
+  const [videoDims, setVideoDims] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
 
   useEffect(() => {
     async function getDevices() {
@@ -38,7 +45,7 @@ export default function CameraFeed({
         const allDevices = await navigator.mediaDevices.enumerateDevices()
         const videoDevices = allDevices.filter(device => device.kind === 'videoinput')
         setDevices(videoDevices)
-        
+
         if (!selectedDeviceId && videoDevices.length > 0 && onDeviceChange) {
           onDeviceChange(videoDevices[0].deviceId)
         }
@@ -47,7 +54,7 @@ export default function CameraFeed({
       }
     }
     getDevices()
-    
+
     navigator.mediaDevices.ondevicechange = getDevices
     return () => {
       navigator.mediaDevices.ondevicechange = null
@@ -98,6 +105,13 @@ export default function CameraFeed({
     }
   }, [isMonitoring, selectedDeviceId])
 
+  const handleLoadedMetadata = () => {
+    const v = videoRef.current
+    if (v && v.videoWidth && v.videoHeight) {
+      setVideoDims({ w: v.videoWidth, h: v.videoHeight })
+    }
+  }
+
   const statusColor = {
     good: 'border-emerald-500/60',
     warning: 'border-amber-500/60',
@@ -110,7 +124,7 @@ export default function CameraFeed({
         <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
           <span className="text-red-400 font-medium mb-1">Camera Error</span>
           <span className="text-xs text-slate-500">{error}</span>
-          <button 
+          <button
             onClick={() => setShowDevicePicker(!showDevicePicker)}
             className="mt-4 px-3 py-1 bg-slate-800 rounded-lg text-[10px] text-white/70 hover:bg-slate-700 transition-colors"
           >
@@ -124,10 +138,22 @@ export default function CameraFeed({
             autoPlay
             playsInline
             muted
+            onLoadedMetadata={handleLoadedMetadata}
             className={`w-full h-full object-cover transition-opacity duration-500 ${isMonitoring ? 'opacity-100' : 'opacity-20'}`}
             style={{ transform: 'scaleX(-1)' }}
           />
-          
+
+          {/* Landmark overlay — SVG viewBox matches source frame so dots
+              track the pixels correctly through object-cover cropping. */}
+          {isMonitoring && landmarks3D && landmarks3D.length > 0 && (
+            <LandmarkOverlay
+              landmarks={landmarks3D}
+              videoWidth={videoDims.w}
+              videoHeight={videoDims.h}
+              mirrored
+            />
+          )}
+
           {/* Visual Feedback Overlay */}
           {isMonitoring && (
             <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-4">
@@ -139,17 +165,16 @@ export default function CameraFeed({
                   </span>
                 </div>
                 <div className="flex flex-col gap-2 pointer-events-auto">
-                   <button 
+                   <button
                     onClick={() => setShowDevicePicker(!showDevicePicker)}
                     className="bg-black/40 backdrop-blur-md px-2 py-1 rounded border border-white/10 text-white/70 font-mono text-[10px] flex items-center gap-1 hover:text-white transition-colors"
                    >
                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                     Source
                    </button>
-                   <button 
+                   <button
                     onClick={() => {
                       onRecalibrate()
-                      // Brief visual feedback
                       const btn = document.activeElement as HTMLElement
                       if (btn) btn.innerText = 'Recalibrated!'
                       setTimeout(() => { if (btn) btn.innerText = 'Recalibrate' }, 1000)
@@ -187,8 +212,8 @@ export default function CameraFeed({
                       setShowDevicePicker(false)
                     }}
                     className={`w-full text-left p-3 rounded-xl border text-xs transition-all ${
-                      selectedDeviceId === device.deviceId 
-                        ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400' 
+                      selectedDeviceId === device.deviceId
+                        ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'
                         : 'bg-slate-800/50 border-slate-700/50 text-slate-400 hover:bg-slate-800'
                     }`}
                   >

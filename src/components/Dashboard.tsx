@@ -51,6 +51,7 @@ export default function Dashboard({ posture, setVideo }: DashboardProps) {
             isMonitoring={posture.isMonitoring}
           />
           <CameraFeed 
+            landmarks3D={posture.landmarks3D}
             onVideoRef={setVideo} 
             isMonitoring={posture.isMonitoring} 
             status={posture.status}

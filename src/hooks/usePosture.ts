@@ -17,6 +17,27 @@ const ISSUE_HISTORY_SIZE = 18
 const EXPLANATION_UPDATE_MS = 1200
 const EXPLANATION_ISSUE_WINDOW = 6
 
+// ============================================================================
+// 3D MODE
+// Uncalibrated absolute-threshold classifier on MediaPipe worldLandmarks
+// (metric 3D, origin at hip midpoint). +x right, +y down, +z away from camera.
+// The whole point: measure forward head as ear-vs-shoulder DEPTH rather than
+// lateral image-plane offset. This is the single feature with the largest
+// accuracy gain for a frontal webcam.
+// ============================================================================
+const USE_3D_MODE = true
+
+// Absolute sagittal-angle thresholds (degrees from vertical). Tune by watching
+// the debug metrics; these are starting points for a seated desk user.
+const NECK_WARN_DEG = 15
+const NECK_BAD_DEG = 28
+const SHOULDER_SLOPE_WARN_DEG = 6
+const SHOULDER_SLOPE_BAD_DEG = 12
+
+// Light EMA on the neck angle (the one signal the classifier cares about).
+const ANGLE_EMA_ALPHA = 0.25
+const SCORE_EMA_ALPHA_3D = 0.30
+
 type NotificationFrequency = AppSettings['notificationFrequency']
 type FeatureKey =
   | 'headLift'
@@ -489,6 +510,211 @@ function createExplanation(
   }
 }
 
+export type Metrics3D = {
+  // All metrics below are rotation-invariant in the horizontal (XZ) plane.
+  // They do not assume the subject is facing the camera. Derived purely from
+  // ear (7, 8) and shoulder (11, 12) world landmarks in meters. No hip reads.
+  neck_deviation_deg: number  // angle between shoulder→ear vector and vertical
+  neck_offset_cm: number      // horizontal distance ear-mid is off shoulder-mid
+  shoulder_slope_deg: number  // angle of shoulder line from horizontal (3D)
+  head_slope_deg: number      // angle of ear line from horizontal (3D)
+  body_rotation_deg: number   // 0 = facing camera, 90 = profile. Diagnostic.
+}
+
+function emptyMetrics3D(): Metrics3D {
+  return {
+    neck_deviation_deg: 0,
+    neck_offset_cm: 0,
+    shoulder_slope_deg: 0,
+    head_slope_deg: 0,
+    body_rotation_deg: 0,
+  }
+}
+
+// Per-frame snapshot of a landmark for the overlay. image_x/y are normalized
+// source-image coordinates in [0, 1] — position the dot with these. world_x/y/z
+// are metric hip-origin coords — display these as labels. visibility is
+// MediaPipe's model-predicted [0, 1] score indicating how confident it is that
+// this landmark is both in the frame AND not occluded.
+export type Landmark3D = {
+  name: 'L Ear' | 'R Ear' | 'L Shoulder' | 'R Shoulder'
+  image_x: number
+  image_y: number
+  world_x: number
+  world_y: number
+  world_z: number
+  visibility: number
+}
+
+function computeMetrics3D(world: PoseLandmarkerResult['worldLandmarks'][number]): Metrics3D {
+  // MediaPipe worldLandmarks frame: origin at hip midpoint, axes locked to the
+  // camera (NOT the body). +x image-right, +y image-down, +z away from camera.
+  // The axes do not rotate when the subject rotates, so any "frontal plane"
+  // or "sagittal plane" interpretation has to be recovered from 3D vectors —
+  // which is what everything below does.
+  const lEar = world[7]
+  const rEar = world[8]
+  const lSh = world[11]
+  const rSh = world[12]
+
+  // Midpoints.
+  const earX = (lEar.x + rEar.x) * 0.5
+  const earY = (lEar.y + rEar.y) * 0.5
+  const earZ = (lEar.z + rEar.z) * 0.5
+  const shX = (lSh.x + rSh.x) * 0.5
+  const shY = (lSh.y + rSh.y) * 0.5
+  const shZ = (lSh.z + rSh.z) * 0.5
+
+  // ---- Neck deviation from vertical. ----
+  // Shoulder→ear vector. Up component is -dy (since +y is image-down).
+  // Horizontal component is the XZ-plane magnitude — direction-agnostic,
+  // which makes the metric rotation-invariant.
+  const neckDx = earX - shX
+  const neckDy = earY - shY
+  const neckDz = earZ - shZ
+  const neckUp = -neckDy
+  const neckHoriz = Math.sqrt(neckDx * neckDx + neckDz * neckDz)
+  const neck_deviation_deg = Math.atan2(neckHoriz, neckUp) * (180 / Math.PI)
+  const neck_offset_cm = neckHoriz * 100
+
+  // ---- Shoulder slope from horizontal (3D). ----
+  // Full 3D horizontal extent (sqrt(dx² + dz²)) means a level shoulder line
+  // reads ~0° whether shoulders are separated in image-X (facing camera) or
+  // image-Z (profile). Sign of dy preserved: + = subject's left lower.
+  const shDx = lSh.x - rSh.x
+  const shDy = lSh.y - rSh.y
+  const shDz = lSh.z - rSh.z
+  const shHoriz = Math.sqrt(shDx * shDx + shDz * shDz)
+  const shoulder_slope_deg = Math.atan2(shDy, shHoriz) * (180 / Math.PI)
+
+  // ---- Head slope from horizontal (3D). ----
+  const earDx = lEar.x - rEar.x
+  const earDy = lEar.y - rEar.y
+  const earDz = lEar.z - rEar.z
+  const earHoriz = Math.sqrt(earDx * earDx + earDz * earDz)
+  const head_slope_deg = Math.atan2(earDy, earHoriz) * (180 / Math.PI)
+
+  // ---- Body rotation from facing-camera. ----
+  // How much the shoulder line is rotated out of the image plane. 0 means
+  // facing camera, 90 means profile view. Diagnostic, not a classifier input.
+  const body_rotation_deg =
+    Math.atan2(Math.abs(shDz), Math.abs(shDx)) * (180 / Math.PI)
+
+  return {
+    neck_deviation_deg,
+    neck_offset_cm,
+    shoulder_slope_deg,
+    head_slope_deg,
+    body_rotation_deg,
+  }
+}
+
+type Classification3D = {
+  status: PostureStatus
+  score: number
+}
+
+function classify3D(m: Metrics3D): Classification3D {
+  // Classifier inputs: neck deviation from vertical + shoulder slope from
+  // horizontal. Both are rotation-invariant, so profile view doesn't inflate
+  // them. body_rotation_deg is NOT used — it's diagnostic only.
+  //
+  // Score is 100 minus the worst axis's piecewise-linear severity. Severity
+  // is 0 in the no-penalty band up to WARN, then ramps linearly to 1 at BAD.
+  const neckAbs = Math.abs(m.neck_deviation_deg)
+  const shSlopeAbs = Math.abs(m.shoulder_slope_deg)
+
+  const neckSev = neckAbs <= NECK_WARN_DEG
+    ? 0
+    : (neckAbs - NECK_WARN_DEG) / (NECK_BAD_DEG - NECK_WARN_DEG)
+  const shSev = shSlopeAbs <= SHOULDER_SLOPE_WARN_DEG
+    ? 0
+    : (shSlopeAbs - SHOULDER_SLOPE_WARN_DEG) / (SHOULDER_SLOPE_BAD_DEG - SHOULDER_SLOPE_WARN_DEG)
+
+  const worst = neckSev > shSev ? neckSev : shSev
+  const capped = worst < 0 ? 0 : worst > 1 ? 1 : worst
+  const score = Math.round((1 - capped) * 100)
+
+  let status: PostureStatus = 'good'
+  if (worst >= 1) status = 'bad'
+  else if (worst > 0) status = 'warning'
+
+  return { status, score }
+}
+
+function buildExplanation3D(m: Metrics3D, status: PostureStatus): ScoreExplanation {
+  // EVERYTHING below is frame-stable. Title, summary, primaryReason, and
+  // recommendation are functions of status ONLY — they do not rotate based on
+  // which axis is momentarily worst. Factor rows always appear in the same
+  // order. Only the numeric text and the impact color change per frame.
+  const neckAbs = Math.abs(m.neck_deviation_deg)
+  const shAbs = Math.abs(m.shoulder_slope_deg)
+
+  const neckImpact: ScoreExplanationFactor['impact'] =
+    neckAbs > NECK_BAD_DEG ? 'negative' : neckAbs > NECK_WARN_DEG ? 'neutral' : 'positive'
+  const shImpact: ScoreExplanationFactor['impact'] =
+    shAbs > SHOULDER_SLOPE_BAD_DEG ? 'negative' : shAbs > SHOULDER_SLOPE_WARN_DEG ? 'neutral' : 'positive'
+
+  const title = status === 'good'
+    ? 'Posture steady'
+    : status === 'warning'
+      ? 'Posture drifting'
+      : 'Posture bad'
+
+  const summary =
+    'Classifier reads neck deviation from vertical and shoulder slope from horizontal. Both are rotation-invariant in the horizontal plane, so turning your chair does not inflate them.'
+
+  const primaryReason =
+    `Absolute thresholds on MediaPipe world landmarks. Neck warn ${NECK_WARN_DEG}°, bad ${NECK_BAD_DEG}°. Shoulder slope warn ${SHOULDER_SLOPE_WARN_DEG}°, bad ${SHOULDER_SLOPE_BAD_DEG}°.`
+
+  const recommendation = status === 'good'
+    ? 'Hold this alignment.'
+    : 'Stack your head over your shoulders and level your shoulder line.'
+
+  return {
+    title,
+    summary,
+    primaryReason,
+    recommendation,
+    factors: [
+      {
+        label: 'Neck deviation from vertical',
+        value: m.neck_deviation_deg.toFixed(1) + '°',
+        impact: neckImpact,
+        description: 'Angle between the shoulder→ear vector and straight up. Rotation-invariant. Classifier input.',
+      },
+      {
+        label: 'Neck horizontal offset',
+        value: m.neck_offset_cm.toFixed(1) + ' cm',
+        impact: 'neutral',
+        description: 'Horizontal distance of the ear midpoint from directly above the shoulder midpoint.',
+      },
+      {
+        label: 'Shoulder slope',
+        value: m.shoulder_slope_deg.toFixed(1) + '°',
+        impact: shImpact,
+        description: 'Angle of the shoulder line from horizontal, in 3D. Classifier input.',
+      },
+      {
+        label: 'Head slope',
+        value: m.head_slope_deg.toFixed(1) + '°',
+        impact: 'neutral',
+        description: 'Angle of the ear line from horizontal, in 3D.',
+      },
+      {
+        label: 'Body rotation',
+        value: m.body_rotation_deg.toFixed(1) + '°',
+        impact: 'neutral',
+        description: '0 = facing camera, 90 = profile view. Diagnostic only; not used for scoring.',
+      },
+    ],
+    insights: [
+      `Neck warn ${NECK_WARN_DEG}°, bad ${NECK_BAD_DEG}°. Shoulder slope warn ${SHOULDER_SLOPE_WARN_DEG}°, bad ${SHOULDER_SLOPE_BAD_DEG}°.`,
+      'Per-frame values are logged to the console. Filter devtools for "[3D]".',
+    ],
+  }
+}
+
 export function usePosture(
   alertMode: AlertMode = 'overlay',
   notificationFrequency: NotificationFrequency = 'immediate',
@@ -504,6 +730,8 @@ export function usePosture(
   const [isCapturingCalibration, setIsCapturingCalibration] = useState(false)
   const [calibrationProgress, setCalibrationProgress] = useState(0)
   const [explanation, setExplanation] = useState<ScoreExplanation>(createInitialExplanation)
+  const [metrics3D, setMetrics3D] = useState<Metrics3D>(emptyMetrics3D)
+  const [landmarks3D, setLandmarks3D] = useState<Landmark3D[]>([])
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const landmarkerRef = useRef<PoseLandmarker | null>(null)
@@ -525,6 +753,7 @@ export function usePosture(
   const lastReportedStatusRef = useRef<PostureStatus>('good')
   const statusHistoryRef = useRef<PostureStatus[]>([])
   const smoothedScoreRef = useRef(100)
+  const smoothedMetrics3DRef = useRef<Metrics3D>(emptyMetrics3D())
 
   useEffect(() => {
     async function initMediaPipe() {
@@ -532,7 +761,9 @@ export function usePosture(
         const vision = await FilesetResolver.forVisionTasks('/wasm')
         const poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
           baseOptions: {
-            modelAssetPath: '/models/pose_landmarker_lite.task',
+            // modelAssetPath: '/models/pose_landmarker_lite.task',
+            // modelAssetPath: '/models/pose_landmarker_full.task',
+            modelAssetPath: '/models/pose_landmarker_heavy.task',
             delegate: 'GPU',
           },
           runningMode: 'VIDEO',
@@ -545,6 +776,13 @@ export function usePosture(
     }
 
     initMediaPipe()
+
+    // 3D mode has no calibration; mark it done immediately so any UI that
+    // gates on calibrationStep goes straight to live monitoring.
+    if (USE_3D_MODE) {
+      setCalibrationStep('done')
+      baselineRef.current = 1
+    }
 
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current)
@@ -621,6 +859,115 @@ export function usePosture(
 
     const pose = computePoseFeatures(result.landmarks[0])
     if (!pose) return
+
+    // ---- 3D MODE PATH. Bypasses calibration and the 2D feature pipeline. ----
+    if (USE_3D_MODE) {
+      const world = result.worldLandmarks && result.worldLandmarks[0]
+      if (!world) return
+
+      const raw = computeMetrics3D(world)
+
+      // Snapshot the four landmarks the classifier actually uses, packaged with
+      // image coords (for overlay positioning), world coords (for label text),
+      // and visibility (for confidence indication).
+      const img = result.landmarks[0]
+      setLandmarks3D([
+        {
+          name: 'L Ear',
+          image_x: img[7].x, image_y: img[7].y,
+          world_x: world[7].x, world_y: world[7].y, world_z: world[7].z,
+          visibility: img[7].visibility ?? 0,
+        },
+        {
+          name: 'R Ear',
+          image_x: img[8].x, image_y: img[8].y,
+          world_x: world[8].x, world_y: world[8].y, world_z: world[8].z,
+          visibility: img[8].visibility ?? 0,
+        },
+        {
+          name: 'L Shoulder',
+          image_x: img[11].x, image_y: img[11].y,
+          world_x: world[11].x, world_y: world[11].y, world_z: world[11].z,
+          visibility: img[11].visibility ?? 0,
+        },
+        {
+          name: 'R Shoulder',
+          image_x: img[12].x, image_y: img[12].y,
+          world_x: world[12].x, world_y: world[12].y, world_z: world[12].z,
+          visibility: img[12].visibility ?? 0,
+        },
+      ])
+
+      // Light EMA on the neck deviation — the one score-driving signal. The
+      // other metrics pass through unsmoothed so the log shows the real
+      // per-frame noise floor.
+      const prev = smoothedMetrics3DRef.current
+      raw.neck_deviation_deg =
+        prev.neck_deviation_deg * (1 - ANGLE_EMA_ALPHA) + raw.neck_deviation_deg * ANGLE_EMA_ALPHA
+      smoothedMetrics3DRef.current = raw
+
+      const decision = classify3D(raw)
+      smoothedScoreRef.current =
+        smoothedScoreRef.current * (1 - SCORE_EMA_ALPHA_3D) + decision.score * SCORE_EMA_ALPHA_3D
+      const finalScore = Math.round(smoothedScoreRef.current)
+
+      // Per-frame log of every metric plus the decision. Unthrottled.
+      // Filter devtools for "[3D]" to isolate. Fixed column order so you
+      // can grep and diff.
+      console.log(
+        `[3D] neckDev=${raw.neck_deviation_deg.toFixed(1).padStart(6)}° ` +
+          `neckOff=${raw.neck_offset_cm.toFixed(1).padStart(6)}cm ` +
+          `shSlope=${raw.shoulder_slope_deg.toFixed(1).padStart(6)}° ` +
+          `hdSlope=${raw.head_slope_deg.toFixed(1).padStart(6)}° ` +
+          `bodyRot=${raw.body_rotation_deg.toFixed(1).padStart(6)}° ` +
+          `→ ${decision.status} score=${finalScore}`,
+      )
+
+      setMetrics3D(raw)
+      setScore(finalScore)
+      setConfidence(95)
+      if (decision.status !== status) setStatus(decision.status)
+      setExplanation(buildExplanation3D(raw, decision.status))
+
+      if (decision.status !== lastReportedStatusRef.current) {
+        if (decision.status === 'good') {
+          window.electronAPI?.hideOverlay()
+        } else if (alertMode === 'overlay' || alertMode === 'both') {
+          window.electronAPI?.showOverlay(decision.status)
+        }
+        lastReportedStatusRef.current = decision.status
+      }
+
+      if (decision.status !== 'good') {
+        const nowMs = Date.now()
+        if (nowMs - lastAlertTimeRef.current > 15000) {
+          const alert: PostureAlert = {
+            id: nowMs.toString(),
+            timestamp: new Date(),
+            type: decision.status,
+            message: randomMsg(decision.status),
+          }
+          setAlerts((prevAlerts) => [alert, ...prevAlerts].slice(0, 50))
+          lastAlertTimeRef.current = nowMs
+        }
+
+        if (window.electronAPI && (alertMode === 'banner' || alertMode === 'both')) {
+          const nowBanner = Date.now()
+          const cooldownMs = getNotificationIntervalMs(notificationFrequency)
+          if (cooldownMs === 0 || nowBanner - lastBannerTimeRef.current >= cooldownMs) {
+            const body =
+              decision.status === 'bad'
+                ? 'Neck deviation or shoulder slope exceeded the bad threshold. Reset your posture.'
+                : 'Posture drifting in 3D mode. Small adjustment recommended.'
+            window.electronAPI.sendNotification('SitRight — Posture Alert', body)
+            lastBannerTimeRef.current = nowBanner
+          }
+        }
+      }
+
+      return
+    }
+    // ---- End 3D path. Below is the original 2D pipeline, unchanged. ----
 
     const detectedConfidence = 95
     setConfidence(detectedConfidence)
@@ -862,6 +1209,8 @@ export function usePosture(
     isCapturingCalibration,
     calibrationProgress,
     explanation,
+    metrics3D,
+    landmarks3D,
     toggleMonitoring: () => setIsMonitoring((prev) => !prev),
     setVideo: (video: HTMLVideoElement | null) => {
       videoRef.current = video
