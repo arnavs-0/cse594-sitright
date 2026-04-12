@@ -4,7 +4,8 @@ import PostureTimeline from './PostureTimeline'
 import AlertHistory from './AlertHistory'
 import CameraFeed from './CameraFeed'
 import CalibrationPanel from './CalibrationPanel'
-import { PostureStatus, PostureAlert, PostureSnapshot } from '../types'
+import ExplainableScore from './ExplainableScore'
+import { PostureStatus, PostureAlert, PostureSnapshot, ScoreExplanation } from '../types'
 import { useSettings } from '../hooks/useSettings'
 
 interface DashboardProps {
@@ -22,6 +23,7 @@ interface DashboardProps {
     calibrationProgress: number
     captureGoodPosture: () => void
     captureBadPosture: () => void
+    explanation: ScoreExplanation
   }
   setVideo: (video: HTMLVideoElement | null) => void
 }
@@ -67,6 +69,11 @@ export default function Dashboard({ posture, setVideo }: DashboardProps) {
           />
         </div>
       </div>
+
+      <ExplainableScore
+        explanation={posture.explanation}
+        isMonitoring={posture.isMonitoring}
+      />
 
       {/* Timeline bar chart */}
       <PostureTimeline timeline={posture.timeline} />

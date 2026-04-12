@@ -17,6 +17,22 @@ export interface PostureSnapshot {
   score: number
 }
 
+export interface ScoreExplanationFactor {
+  label: string
+  value: string
+  impact: 'positive' | 'neutral' | 'negative'
+  description: string
+}
+
+export interface ScoreExplanation {
+  title: string
+  summary: string
+  primaryReason: string
+  recommendation: string
+  factors: ScoreExplanationFactor[]
+  insights: string[]
+}
+
 export type AlertMode = 'banner' | 'overlay' | 'both'
 
 export interface AppSettings {
