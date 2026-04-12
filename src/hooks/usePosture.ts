@@ -1,6 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { PoseLandmarker, FilesetResolver, PoseLandmarkerResult } from '@mediapipe/tasks-vision'
-import { PostureStatus, PostureAlert, PostureSnapshot, AlertMode } from '../types'
+import { PostureStatus, PostureAlert, PostureSnapshot, AlertMode, AppSettings } from '../types'
+
+const CAPTURE_MS = 2500
+const MIN_CAPTURE_SAMPLES = 20
+type NotificationFrequency = AppSettings['notificationFrequency']
+
+function getNotificationIntervalMs(frequency: NotificationFrequency): number {
+  if (frequency === 'immediate') return 0
+  if (frequency === '10sec') return 10 * 1000
+  if (frequency === '30sec') return 30 * 1000
+  return 5 * 60 * 1000
+}
 
 const POSTURE_MESSAGES: Record<PostureStatus, string[]> = {
   good: ['Great posture!', 'Looking good!', 'Keep it up!'],
@@ -22,7 +33,10 @@ function randomMsg(status: PostureStatus): string {
   return msgs[Math.floor(Math.random() * msgs.length)]
 }
 
-export function usePosture(alertMode: AlertMode = 'overlay') {
+export function usePosture(
+  alertMode: AlertMode = 'overlay',
+  notificationFrequency: NotificationFrequency = 'immediate',
+) {
   const [isMonitoring, setIsMonitoring] = useState(true)
   const [status, setStatus] = useState<PostureStatus>('good')
   const [score, setScore] = useState(100)
@@ -30,13 +44,23 @@ export function usePosture(alertMode: AlertMode = 'overlay') {
   const [alerts, setAlerts] = useState<PostureAlert[]>([])
   const [timeline, setTimeline] = useState<PostureSnapshot[]>([])
   const [sessionStart] = useState<Date>(new Date())
+  const [calibrationStep, setCalibrationStep] = useState<'good' | 'bad' | 'done'>('good')
+  const [isCapturingCalibration, setIsCapturingCalibration] = useState(false)
+  const [calibrationProgress, setCalibrationProgress] = useState(0)
   
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const landmarkerRef = useRef<PoseLandmarker | null>(null)
   const lastVideoTimeRef = useRef(-1)
   const requestRef = useRef<number>()
   const baselineRef = useRef<number | null>(null)
+  const calibrationTargetRef = useRef<'good' | 'bad' | null>(null)
+  const calibrationStartTimeRef = useRef(0)
+  const calibrationSamplesRef = useRef<number[]>([])
+  const goodCalibrationMetricRef = useRef<number | null>(null)
+  const latestMetricRef = useRef<number | null>(null)
+  const calibrationProfileRef = useRef<{ goodMetric: number; badRatio: number; warningRatio: number } | null>(null)
   const lastAlertTimeRef = useRef(0)
+  const lastBannerTimeRef = useRef(0)
   const lastReportedStatusRef = useRef<PostureStatus>('good')
 
   /* ---- ASYMMETRIC SMOOTHING STATE ---- */
@@ -72,12 +96,40 @@ export function usePosture(alertMode: AlertMode = 'overlay') {
     }
   }, [])
 
-  const recalibrate = useCallback(() => {
+  const resetCalibration = useCallback(() => {
     baselineRef.current = null
+    calibrationProfileRef.current = null
+    goodCalibrationMetricRef.current = null
+    calibrationTargetRef.current = null
+    calibrationSamplesRef.current = []
+    setCalibrationProgress(0)
+    setIsCapturingCalibration(false)
+    setCalibrationStep('good')
     statusHistoryRef.current = []
     smoothedScoreRef.current = 100
-    console.log('Recalibrating baseline...')
+    setStatus('good')
+    setScore(100)
+    window.electronAPI?.hideOverlay()
   }, [])
+
+  const startCapture = useCallback((target: 'good' | 'bad') => {
+    if (isCapturingCalibration) return
+    calibrationTargetRef.current = target
+    calibrationStartTimeRef.current = performance.now()
+    calibrationSamplesRef.current = []
+    setCalibrationProgress(0)
+    setIsCapturingCalibration(true)
+  }, [isCapturingCalibration])
+
+  const captureGoodPosture = useCallback(() => {
+    if (calibrationStep !== 'good') return
+    startCapture('good')
+  }, [calibrationStep, startCapture])
+
+  const captureBadPosture = useCallback(() => {
+    if (calibrationStep !== 'bad') return
+    startCapture('bad')
+  }, [calibrationStep, startCapture])
 
   const processResult = useCallback((result: PoseLandmarkerResult) => {
     if (!result.landmarks || result.landmarks.length === 0) {
@@ -99,21 +151,86 @@ export function usePosture(alertMode: AlertMode = 'overlay') {
     )
 
     const currentMetric = (shoulderMidpointY - nose.y) / shoulderWidth
+    latestMetricRef.current = currentMetric
+
+    if (isCapturingCalibration && calibrationTargetRef.current) {
+      calibrationSamplesRef.current.push(currentMetric)
+      const elapsed = performance.now() - calibrationStartTimeRef.current
+      const progress = Math.min(100, (elapsed / CAPTURE_MS) * 100)
+      setCalibrationProgress(progress)
+
+      if (elapsed >= CAPTURE_MS) {
+        const samples = calibrationSamplesRef.current
+        const average =
+          samples.length === 0 ? 0 : samples.reduce((sum, value) => sum + value, 0) / samples.length
+        const target = calibrationTargetRef.current
+
+        setIsCapturingCalibration(false)
+        calibrationTargetRef.current = null
+        calibrationSamplesRef.current = []
+
+        if (samples.length < MIN_CAPTURE_SAMPLES || average <= 0) {
+          setCalibrationProgress(0)
+          return
+        }
+
+        if (target === 'good') {
+          goodCalibrationMetricRef.current = average
+          setCalibrationProgress(0)
+          setCalibrationStep('bad')
+        } else {
+          const goodMetric = goodCalibrationMetricRef.current ?? average * 1.2
+          const safeGoodMetric = Math.max(goodMetric, average + 0.01)
+          const observedBadRatio = Math.max(0.45, Math.min(0.9, average / safeGoodMetric))
+          const warningRatio = Math.max(observedBadRatio + 0.05, Math.min(0.95, observedBadRatio + 0.15))
+
+          calibrationProfileRef.current = {
+            goodMetric: safeGoodMetric,
+            badRatio: observedBadRatio,
+            warningRatio,
+          }
+
+          baselineRef.current = safeGoodMetric
+          statusHistoryRef.current = []
+          smoothedScoreRef.current = 100
+          lastReportedStatusRef.current = 'good'
+          setStatus('good')
+          setScore(100)
+          setCalibrationProgress(100)
+          setCalibrationStep('done')
+          window.electronAPI?.hideOverlay()
+        }
+      }
+
+      return
+    }
+
+    if (calibrationStep !== 'done') {
+      return
+    }
 
     if (baselineRef.current === null && currentMetric > 0) {
       baselineRef.current = currentMetric
     }
 
     if (baselineRef.current) {
-      const ratio = currentMetric / baselineRef.current
+      const profile = calibrationProfileRef.current
+      const ratio = profile
+        ? currentMetric / profile.goodMetric
+        : currentMetric / baselineRef.current
       
       let rawStatus: PostureStatus = 'good'
       let rawScore = Math.floor(ratio * 100)
 
+      if (profile) {
+        const normalizedScore = ((ratio - profile.badRatio) / (1 - profile.badRatio)) * 100
+        rawScore = Math.max(0, Math.min(100, Math.round(normalizedScore)))
+      }
+
       // INCREASED SENSITIVITY THRESHOLDS
-      if (ratio < 0.75) {
+      if (ratio < (profile?.badRatio ?? 0.75)) {
         rawStatus = 'bad'
-      } else if (ratio < 0.90) {
+      } else if (ratio < (profile?.warningRatio ?? 0.90)) {
         rawStatus = 'warning'
       } else {
         rawStatus = 'good'
@@ -162,7 +279,7 @@ export function usePosture(alertMode: AlertMode = 'overlay') {
         lastReportedStatusRef.current = newStatus
       }
 
-      // DEBOUNCED ALERTS
+      // Debounced alert history (for timeline/history cards)
       if (newStatus !== 'good') {
         const now = Date.now()
         if (now - lastAlertTimeRef.current > 15000) {
@@ -174,14 +291,27 @@ export function usePosture(alertMode: AlertMode = 'overlay') {
           }
           setAlerts((prev) => [alert, ...prev].slice(0, 50))
           lastAlertTimeRef.current = now
+        }
+      }
 
-          if (newStatus === 'bad' && window.electronAPI && (alertMode === 'banner' || alertMode === 'both')) {
-            window.electronAPI.sendNotification('SitRight — Posture Alert', alert.message)
-          }
+      // Banner notifications use user-selected cadence and fire on warning/bad.
+      if (newStatus !== 'good' && window.electronAPI && (alertMode === 'banner' || alertMode === 'both')) {
+        const now = Date.now()
+        const cooldownMs = getNotificationIntervalMs(notificationFrequency)
+        const statusChanged = newStatus !== lastReportedStatusRef.current
+        const cooldownElapsed = cooldownMs === 0 || now - lastBannerTimeRef.current >= cooldownMs
+
+        if (statusChanged || cooldownElapsed) {
+          const body =
+            newStatus === 'bad'
+              ? 'Poor posture detected. Sit up and reset your shoulders.'
+              : 'Posture drift detected. Make a small adjustment.'
+          window.electronAPI.sendNotification('SitRight — Posture Alert', body)
+          lastBannerTimeRef.current = now
         }
       }
     }
-  }, [alertMode, confidence, status])
+  }, [alertMode, calibrationStep, confidence, isCapturingCalibration, notificationFrequency, status])
 
   const detect = useCallback(() => {
     if (videoRef.current && isMonitoring && landmarkerRef.current) {
@@ -233,8 +363,13 @@ export function usePosture(alertMode: AlertMode = 'overlay') {
     timeline,
     isMonitoring,
     sessionStart,
-    toggleMonitoring: () => setIsMonitoring(!isMonitoring),
+    calibrationStep,
+    isCapturingCalibration,
+    calibrationProgress,
+    toggleMonitoring: () => setIsMonitoring((prev) => !prev),
     setVideo: (video: HTMLVideoElement | null) => { videoRef.current = video },
-    recalibrate,
+    recalibrate: resetCalibration,
+    captureGoodPosture,
+    captureBadPosture,
   }
 }

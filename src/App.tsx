@@ -9,8 +9,8 @@ export type Page = 'dashboard' | 'settings'
 
 function AppInner() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
-  const { alertMode } = useSettings()
-  const posture = usePosture(alertMode)
+  const { settings } = useSettings()
+  const posture = usePosture(settings.alertMode, settings.notificationFrequency)
 
   return (
     <Layout
@@ -20,11 +20,12 @@ function AppInner() {
       onToggleMonitoring={posture.toggleMonitoring}
       postureStatus={posture.status}
     >
-      {currentPage === 'dashboard' ? (
+      <div className={currentPage === 'dashboard' ? 'block' : 'hidden'}>
         <Dashboard posture={posture} setVideo={posture.setVideo} />
-      ) : (
+      </div>
+      <div className={currentPage === 'settings' ? 'block' : 'hidden'}>
         <Settings />
-      )}
+      </div>
     </Layout>
   )
 }

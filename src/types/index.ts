@@ -20,7 +20,7 @@ export interface PostureSnapshot {
 export type AlertMode = 'banner' | 'overlay' | 'both'
 
 export interface AppSettings {
-  notificationFrequency: 'immediate' | '5min' | '15min' | '30min'
+  notificationFrequency: 'immediate' | '10sec' | '30sec' | '5min' 
   alertMode: AlertMode
   sensitivity: number // 1–5
   soundEnabled: boolean

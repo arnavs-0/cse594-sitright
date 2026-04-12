@@ -24,9 +24,9 @@ export default function Settings() {
             className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-indigo-500 transition-colors"
           >
             <option value="immediate">Immediate</option>
+            <option value="10sec">Every 10 seconds</option>
+            <option value="30sec">Every 30 seconds</option>
             <option value="5min">Every 5 minutes</option>
-            <option value="15min">Every 15 minutes</option>
-            <option value="30min">Every 30 minutes</option>
           </select>
         </Row>
 
@@ -74,15 +74,6 @@ export default function Settings() {
         <Row label="Menu Bar Icon" desc="Show SitRight status in the menu bar">
           <Toggle checked={settings.showInMenuBar} onChange={(v) => set('showInMenuBar', v)} />
         </Row>
-      </Section>
-
-      {/* ── Demo shortcuts ── */}
-      <Section title="Demo Controls" desc="Keyboard shortcuts for demo purposes">
-        <div className="space-y-2 py-1">
-          <Shortcut keys={['⌘', '1']} desc="Set posture to Good" />
-          <Shortcut keys={['⌘', '2']} desc="Set posture to Warning" />
-          <Shortcut keys={['⌘', '3']} desc="Set posture to Bad (triggers alert)" />
-        </div>
       </Section>
     </div>
   )
@@ -145,20 +136,3 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   )
 }
 
-function Shortcut({ keys, desc }: { keys: string[]; desc: string }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-xs text-slate-400">{desc}</span>
-      <div className="flex items-center gap-1">
-        {keys.map((k, i) => (
-          <span key={i} className="inline-flex items-center">
-            <kbd className="px-1.5 py-0.5 text-[10px] bg-slate-700 border border-slate-600 rounded text-slate-300 font-mono">
-              {k}
-            </kbd>
-            {i < keys.length - 1 && <span className="text-slate-600 mx-1">+</span>}
-          </span>
-        ))}
-      </div>
-    </div>
-  )
-}

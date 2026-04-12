@@ -3,6 +3,7 @@ import SessionStats from './SessionStats'
 import PostureTimeline from './PostureTimeline'
 import AlertHistory from './AlertHistory'
 import CameraFeed from './CameraFeed'
+import CalibrationPanel from './CalibrationPanel'
 import { PostureStatus, PostureAlert, PostureSnapshot } from '../types'
 import { useSettings } from '../hooks/useSettings'
 
@@ -16,6 +17,11 @@ interface DashboardProps {
     isMonitoring: boolean
     sessionStart: Date
     recalibrate: () => void
+    calibrationStep: 'good' | 'bad' | 'done'
+    isCapturingCalibration: boolean
+    calibrationProgress: number
+    captureGoodPosture: () => void
+    captureBadPosture: () => void
   }
   setVideo: (video: HTMLVideoElement | null) => void
 }
@@ -25,6 +31,14 @@ export default function Dashboard({ posture, setVideo }: DashboardProps) {
 
   return (
     <div className="space-y-6">
+      <CalibrationPanel
+        calibrationStep={posture.calibrationStep}
+        isCapturingCalibration={posture.isCapturingCalibration}
+        calibrationProgress={posture.calibrationProgress}
+        onCaptureGood={posture.captureGoodPosture}
+        onCaptureBad={posture.captureBadPosture}
+      />
+
       {/* Top row — posture ring + camera feed + stat cards */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1 space-y-6">

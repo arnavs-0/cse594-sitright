@@ -2,7 +2,7 @@ import { createContext, useContext, useState, useCallback, ReactNode } from 'rea
 import { AppSettings, AlertMode } from '../types'
 
 const defaults: AppSettings = {
-  notificationFrequency: '5min',
+  notificationFrequency: '10sec',
   alertMode: 'overlay',
   sensitivity: 3,
   soundEnabled: true,
