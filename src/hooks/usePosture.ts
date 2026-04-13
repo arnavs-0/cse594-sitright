@@ -882,6 +882,14 @@ export function usePosture(
   const issueHistoryRef = useRef<FeatureKey[]>([])
   const explanationIssueHistoryRef = useRef<Array<FeatureKey | null>>([])
   const smoothedFeatureRef = useRef<PoseFeatures | null>(null)
+  // EMA for the 2D-mode forwardHead value. forwardHead is the rotation-
+  // invariant 3D ear angle (in degrees) and has a per-frame noise floor of
+  // ~1-3°. Because severity is asymmetric (only positive deviations from the
+  // upright baseline count), feeding raw values into the classifier biases
+  // the score downward at perfect posture. Smoothing both the runtime value
+  // AND the calibration samples keeps them in the same regime, so deviation
+  // converges to ~0 at upright. Matches ANGLE_EMA_ALPHA used by 3D mode.
+  const smoothedForwardHeadRef = useRef<number | null>(null)
   const explanationRef = useRef<ExplanationSnapshot>({ status: 'good', issue: null })
   const lastExplanationUpdateRef = useRef(0)
   const lastAlertTimeRef = useRef(0)
@@ -956,6 +964,7 @@ export function usePosture(
     issueHistoryRef.current = []
     explanationIssueHistoryRef.current = []
     smoothedFeatureRef.current = null
+    smoothedForwardHeadRef.current = null
     explanationRef.current = { status: 'good', issue: null }
     lastExplanationUpdateRef.current = 0
     statusHistoryRef.current = []
@@ -1237,6 +1246,21 @@ export function usePosture(
       return
     }
     // ---- End 3D path. Below is the original 2D pipeline, unchanged. ----
+
+    // EMA the forwardHead angle in place. Both the calibration capture below
+    // and the severity computation in buildIssueAnalyses see the smoothed
+    // value, so the calibrated baseline and the runtime measurement live in
+    // the same noise regime. Without this, per-frame angle jitter (~1-3°)
+    // crosses the WARN threshold on roughly half the frames at perfect
+    // upright posture and drags the score down to the 85-95 range.
+    {
+      const prev = smoothedForwardHeadRef.current
+      const next = prev === null
+        ? pose.features.forwardHead
+        : prev * (1 - ANGLE_EMA_ALPHA) + pose.features.forwardHead * ANGLE_EMA_ALPHA
+      smoothedForwardHeadRef.current = next
+      pose.features.forwardHead = next
+    }
 
     const detectedConfidence = 95
     setConfidence(detectedConfidence)
