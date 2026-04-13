@@ -871,10 +871,11 @@ export function usePosture(
   } | null>(null)
   const calib3DSamplesRef = useRef<RawAngles3D[]>([])
   const calib3DStartRef = useRef(0)
-  // 'pending' = waiting for first frame after Recalibrate.
+  // 'idle'      = no capture in progress, waiting for the user to click
+  //               "Capture Good Posture" in the modal.
   // 'capturing' = sampling for CAPTURE_3D_MS.
-  // 'done' = baseline stored in calib3DRef, deviations active.
-  const calib3DStateRef = useRef<'pending' | 'capturing' | 'done'>('pending')
+  // 'done'      = baseline stored in calib3DRef, deviations active.
+  const calib3DStateRef = useRef<'idle' | 'capturing' | 'done'>('idle')
 
   useEffect(() => {
     async function initMediaPipe() {
@@ -896,10 +897,12 @@ export function usePosture(
 
     initMediaPipe()
 
-    // 3D mode has no calibration; mark it done immediately so any UI that
-    // gates on calibrationStep goes straight to live monitoring.
+    // 3D mode reuses the 2D CalibrationPanel modal: calibrationStep starts at
+    // 'good' (the React useState default), so the modal renders. The user
+    // clicks "Capture Good Posture", which routes to the 3D capture below.
+    // baselineRef is set to a non-null sentinel so the 2D-path guards that
+    // gate on it don't reject 3D frames.
     if (USE_3D_MODE) {
-      setCalibrationStep('done')
       baselineRef.current = 1
     }
 
@@ -926,7 +929,7 @@ export function usePosture(
     // they're sitting upright and want a new baseline captured.
     calib3DRef.current = null
     calib3DSamplesRef.current = []
-    calib3DStateRef.current = 'pending'
+    calib3DStateRef.current = 'idle'
     smoothedAnglesSeededRef.current = false
     setCalibrationProgress(0)
     setIsCapturingCalibration(false)
@@ -949,6 +952,19 @@ export function usePosture(
 
   const captureGoodPosture = useCallback(() => {
     if (calibrationStep !== 'good') return
+    if (USE_3D_MODE) {
+      // Arm the 3D capture. The 3D branch in processResult sees state ===
+      // 'capturing' on the next frame, pushes samples for CAPTURE_3D_MS, then
+      // averages and dismisses the modal.
+      calib3DRef.current = null
+      calib3DSamplesRef.current = []
+      calib3DStartRef.current = performance.now()
+      calib3DStateRef.current = 'capturing'
+      smoothedAnglesSeededRef.current = false
+      setCalibrationProgress(0)
+      setIsCapturingCalibration(true)
+      return
+    }
     startCapture('good')
   }, [calibrationStep, startCapture])
 
@@ -1013,20 +1029,18 @@ export function usePosture(
       const sm = smoothedAnglesRef.current
 
       // ---- Step 3: calibration capture state machine. ----
-      // pending → start a capture window using NOW as t0, drop into capturing.
-      // capturing → push the smoothed sample, finalize when window elapsed and
-      //   min sample count reached.
-      // done → no-op here, just compute deviations below.
+      // idle      → no-op. Waiting for the user to click "Capture Good Posture"
+      //             in the modal, which arms calib3DStateRef = 'capturing' and
+      //             starts the timer.
+      // capturing → push the smoothed sample, finalize when window elapsed
+      //             AND min sample count reached, then dismiss the modal.
+      // done      → no-op here. Deviations get computed below.
       let calibProgress = 100
-      if (calib3DStateRef.current === 'pending') {
-        calib3DStartRef.current = performance.now()
-        calib3DSamplesRef.current = []
-        calib3DStateRef.current = 'capturing'
-      }
       if (calib3DStateRef.current === 'capturing') {
         calib3DSamplesRef.current.push({ ...sm })
         const elapsed = performance.now() - calib3DStartRef.current
         calibProgress = Math.min(99, Math.round((elapsed / CAPTURE_3D_MS) * 100))
+        setCalibrationProgress(calibProgress)
         if (elapsed >= CAPTURE_3D_MS &&
             calib3DSamplesRef.current.length >= CAPTURE_3D_MIN_SAMPLES) {
           const samples = calib3DSamplesRef.current
@@ -1046,6 +1060,9 @@ export function usePosture(
           }
           calib3DStateRef.current = 'done'
           calibProgress = 100
+          setIsCapturingCalibration(false)
+          setCalibrationProgress(100)
+          setCalibrationStep('done')
         }
       }
 
