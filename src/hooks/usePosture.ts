@@ -25,13 +25,14 @@ const EXPLANATION_ISSUE_WINDOW = 6
 // lateral image-plane offset. This is the single feature with the largest
 // accuracy gain for a frontal webcam.
 // ============================================================================
-const USE_3D_MODE = true
+// const USE_3D_MODE = true
+const USE_3D_MODE = false
 
 // Calibration-relative thresholds (degrees of deviation from upright baseline).
-const HEAD_DEV_WARN_DEG = 8
-const HEAD_DEV_BAD_DEG = 18
-const SHOULDER_DEV_WARN_DEG = 6
-const SHOULDER_DEV_BAD_DEG = 14
+const HEAD_DEV_WARN_DEG = 3
+const HEAD_DEV_BAD_DEG = 6
+const SHOULDER_DEV_WARN_DEG = 3
+const SHOULDER_DEV_BAD_DEG = 6
 
 // Calibration capture window.
 const CAPTURE_3D_MS = 1500
@@ -43,6 +44,11 @@ const VIS_MIN = 0.5
 // Light EMA on the per-frame angles before classification.
 const ANGLE_EMA_ALPHA = 0.25
 const SCORE_EMA_ALPHA_3D = 0.30
+
+// 2D-mode yaw threshold (degrees of body rotation away from facing-camera).
+// At or above this, the 2D pixel-based features become unreliable and the
+// score is driven by forwardHead alone — which is the 3D ear-angle metric.
+const YAW_HIGH_DEG = 35
 
 type NotificationFrequency = AppSettings['notificationFrequency']
 type FeatureKey =
@@ -204,6 +210,7 @@ function createInitialExplanation(): ScoreExplanation {
 function computePoseFeatures(landmarks: PoseLandmarkerResult['landmarks'][number]): {
   legacyMetric: number
   features: PoseFeatures
+  bodyRotationDeg: number
 } | null {
   const nose = landmarks[0]
   const leftEar = landmarks[7]
@@ -223,18 +230,35 @@ function computePoseFeatures(landmarks: PoseLandmarkerResult['landmarks'][number
 
   const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2
   const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2
+  const shoulderMidZ = ((leftShoulder.z ?? 0) + (rightShoulder.z ?? 0)) / 2
   const earMidX = (leftEar.x + rightEar.x) / 2
   const earMidY = (leftEar.y + rightEar.y) / 2
+  const earMidZ = ((leftEar.z ?? 0) + (rightEar.z ?? 0)) / 2
   const hipMidX = (leftHip.x + rightHip.x) / 2
   const hipMidY = (leftHip.y + rightHip.y) / 2
 
   const headLift = clamp((shoulderMidY - nose.y) / bodyScale, 0, 3)
-  const forwardHead = Math.abs(earMidX - shoulderMidX) / bodyScale
+  // forwardHead is now the 3D ear angle from vertical, in image coordinates.
+  // Rotation-invariant about y, so chair-spinning leaves it ~unchanged. The
+  // existing severityForFeature interpolates it between good/bad calibration
+  // samples exactly the same way it does the other features. Killed: the old
+  // |earMidX - shoulderMidX| / bodyScale lateral-offset version.
+  const forwardHead = angleFromUp(earMidX, earMidY, earMidZ, shoulderMidX, shoulderMidY, shoulderMidZ)
   const torsoLean = Math.abs(shoulderMidX - hipMidX) / bodyScale
   const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y) / bodyScale
   const headTilt = Math.abs(leftEar.y - rightEar.y) / bodyScale
   const shoulderRelaxation = clamp(((leftShoulder.y - leftEar.y) + (rightShoulder.y - rightEar.y)) / 2 / bodyScale, 0, 2)
   const legacyMetric = (shoulderMidY - nose.y) / bodyScale
+
+  // Body yaw from facing-camera. atan2(|dz|, |dx|) on the shoulder line:
+  // 0° = shoulders separated entirely in image-x (facing camera), 90° =
+  // entirely in image-z (profile). The 2D pixel features become unreliable
+  // as this grows; processResult uses it to fall back to forwardHead-only
+  // scoring above YAW_HIGH_DEG.
+  const shDx = leftShoulder.x - rightShoulder.x
+  const shDz = (leftShoulder.z ?? 0) - (rightShoulder.z ?? 0)
+  const bodyRotationDeg =
+    Math.atan2(Math.abs(shDz), Math.abs(shDx)) * (180 / Math.PI)
 
   if (!Number.isFinite(headLift) || headLift <= 0) {
     return null
@@ -250,6 +274,7 @@ function computePoseFeatures(landmarks: PoseLandmarkerResult['landmarks'][number
       headTilt,
       shoulderRelaxation,
     },
+    bodyRotationDeg,
   }
 }
 
@@ -263,9 +288,19 @@ function severityForFeature(current: number, good: number, bad: number, higherIs
 }
 
 function buildIssueAnalyses(current: PoseFeatures, profile: CalibrationProfile): IssueAnalysis[] {
+  // forwardHead is special: it's the 3D ear angle in degrees, and its
+  // severity is computed as deviation-from-upright against absolute degree
+  // thresholds (HEAD_DEV_WARN_DEG / HEAD_DEV_BAD_DEG), NOT as interpolation
+  // between good and bad calibration. profile.bad.forwardHead is recorded by
+  // the bad-capture step but deliberately ignored here so the user doesn't
+  // have to deliberately produce a bad forward-head pose during calibration.
+  const fwdDev = current.forwardHead - profile.good.forwardHead
+  const fwdRange = Math.max(0.02, HEAD_DEV_BAD_DEG - HEAD_DEV_WARN_DEG)
+  const fwdSeverity = clamp((fwdDev - HEAD_DEV_WARN_DEG) / fwdRange, 0, 1.15)
+
   const severities: Record<FeatureKey, number> = {
     headLift: severityForFeature(current.headLift, profile.good.headLift, profile.bad.headLift, true),
-    forwardHead: severityForFeature(current.forwardHead, profile.good.forwardHead, profile.bad.forwardHead, false),
+    forwardHead: fwdSeverity,
     torsoLean: severityForFeature(current.torsoLean, profile.good.torsoLean, profile.bad.torsoLean, false),
     shoulderTilt: severityForFeature(current.shoulderTilt, profile.good.shoulderTilt, profile.bad.shoulderTilt, false),
     headTilt: severityForFeature(current.headTilt, profile.good.headTilt, profile.bad.headTilt, false),
@@ -1275,10 +1310,27 @@ export function usePosture(
     const profile = calibrationProfileRef.current
     const ratio = pose.legacyMetric / baselineRef.current
     const issues = buildIssueAnalyses(pose.features, profile).sort((a, b) => b.severity - a.severity)
-    const weightedPenalty = issues.reduce((sum, issue) => sum + issue.severity * FEATURE_WEIGHTS[issue.key], 0)
-    const featureScore = clampPercent((1 - clamp(weightedPenalty, 0, 1)) * 100)
+
+    // Yaw gate. When the user is facing the camera, all six features vote via
+    // the existing weighted sum + 25% legacy blend. When the user is rotated
+    // past YAW_HIGH_DEG, the 2D pixel features (headLift, torsoLean, the two
+    // tilts, shoulderRelaxation) become unreliable. The score collapses to
+    // forwardHead severity alone — which is the rotation-invariant 3D
+    // ear-angle metric — and the legacy ratio (also pixel-based) is dropped.
+    const yawHigh = pose.bodyRotationDeg >= YAW_HIGH_DEG
+    let featureScore: number
+    if (yawHigh) {
+      const fwd = issues.find((i) => i.key === 'forwardHead')
+      const fwdSev = fwd ? fwd.severity : 0
+      featureScore = clampPercent((1 - clamp(fwdSev, 0, 1)) * 100)
+    } else {
+      const weightedPenalty = issues.reduce((sum, issue) => sum + issue.severity * FEATURE_WEIGHTS[issue.key], 0)
+      featureScore = clampPercent((1 - clamp(weightedPenalty, 0, 1)) * 100)
+    }
     const legacyScore = clampPercent(((ratio - profile.badThreshold) / (1 - profile.badThreshold)) * 100)
-    const rawScore = clampPercent(featureScore * 0.75 + legacyScore * 0.25)
+    const rawScore = yawHigh
+      ? featureScore
+      : clampPercent(featureScore * 0.75 + legacyScore * 0.25)
 
     let rawStatus: PostureStatus = 'good'
     if (ratio < profile.badThreshold || rawScore < 50) {
