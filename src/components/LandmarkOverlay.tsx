@@ -84,7 +84,19 @@ export default function LandmarkOverlay({
               strokeWidth={3}
               paintOrder="stroke"
             >
-              x={lm.world_x.toFixed(2)} y={lm.world_y.toFixed(2)} z={lm.world_z.toFixed(2)}
+              w: x={lm.world_x.toFixed(2)} y={lm.world_y.toFixed(2)} z={lm.world_z.toFixed(2)}
+            </text>
+            <text
+              x={cx + 14}
+              y={cy + 26}
+              fontSize={11}
+              fontFamily="monospace"
+              fill="#93c5fd"
+              stroke="black"
+              strokeWidth={3}
+              paintOrder="stroke"
+            >
+              i: x={lm.image_x.toFixed(2)} y={lm.image_y.toFixed(2)} z={lm.image_z.toFixed(2)}
             </text>
           </g>
         )
