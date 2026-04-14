@@ -48,11 +48,12 @@ export interface ScoreExplanation {
   insights: string[]
 }
 
-export type AlertMode = 'banner' | 'overlay' | 'both'
+export type AlertMode = 'none' | 'banner' | 'overlay' | 'both'
 
 export interface AppSettings {
   notificationFrequency: 'immediate' | '10sec' | '30sec' | '5min' 
   alertMode: AlertMode
+  overlayEnabled: boolean
   sensitivity: number // 1–5
   soundEnabled: boolean
   startMinimized: boolean

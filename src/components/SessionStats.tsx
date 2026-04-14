@@ -11,6 +11,8 @@ interface Props {
   sessionTimeline: PostureSnapshot[]
   sessionAlerts: PostureAlert[]
   lastSessionSummary: SessionSummary | null
+  overlayEnabled: boolean
+  onOverlayEnabledChange: (enabled: boolean) => void
   onStartSession: () => void
   onStopSession: () => void
 }
@@ -149,6 +151,8 @@ export default function SessionStats({
   sessionTimeline,
   sessionAlerts,
   lastSessionSummary,
+  overlayEnabled,
+  onOverlayEnabledChange,
   onStartSession,
   onStopSession,
 }: Props) {
@@ -278,7 +282,19 @@ export default function SessionStats({
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
+            <label className="flex items-start gap-3 rounded-xl border border-slate-700/60 bg-slate-900/50 px-3 py-2 text-sm text-slate-200">
+              <input
+                type="checkbox"
+                checked={overlayEnabled}
+                onChange={(e) => onOverlayEnabledChange(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-slate-500 bg-slate-900 text-indigo-500 accent-indigo-500"
+              />
+              <span className="leading-tight">
+                <span className="block text-sm font-medium text-slate-100">Red posture overlay</span>
+                <span className="block text-[11px] text-slate-400">Show the screen tint only when this is checked.</span>
+              </span>
+            </label>
             <button
               onClick={onStartSession}
               disabled={isSessionActive}

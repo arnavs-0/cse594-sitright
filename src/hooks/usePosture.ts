@@ -994,6 +994,18 @@ export function usePosture(
     }
   }, [])
 
+  useEffect(() => {
+    if (!window.electronAPI) return
+
+    const overlayEnabled = alertMode === 'overlay' || alertMode === 'both'
+    if (status !== 'good' && overlayEnabled) {
+      window.electronAPI.showOverlay(status)
+      return
+    }
+
+    window.electronAPI.hideOverlay()
+  }, [alertMode, status])
+
   const resetCalibration = useCallback(() => {
     baselineRef.current = null
     calibrationProfileRef.current = null

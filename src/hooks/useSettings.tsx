@@ -4,6 +4,7 @@ import { AppSettings, AlertMode } from '../types'
 const defaults: AppSettings = {
   notificationFrequency: '10sec',
   alertMode: 'overlay',
+  overlayEnabled: true,
   sensitivity: 3,
   soundEnabled: true,
   startMinimized: false,

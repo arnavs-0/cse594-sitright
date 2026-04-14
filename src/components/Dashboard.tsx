@@ -80,6 +80,8 @@ export default function Dashboard({ posture, setVideo }: DashboardProps) {
             sessionTimeline={posture.sessionTimeline}
             sessionAlerts={posture.sessionAlerts}
             lastSessionSummary={posture.lastSessionSummary}
+            overlayEnabled={settings.overlayEnabled}
+            onOverlayEnabledChange={(enabled) => update('overlayEnabled', enabled)}
             onStartSession={posture.startSession}
             onStopSession={posture.stopSession}
           />

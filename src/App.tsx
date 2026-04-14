@@ -7,10 +7,17 @@ import Settings from './components/Settings'
 
 export type Page = 'dashboard' | 'settings'
 
+function getEffectiveAlertMode(settings: ReturnType<typeof useSettings>['settings']) {
+  if (settings.overlayEnabled) return settings.alertMode
+  if (settings.alertMode === 'both') return 'banner'
+  if (settings.alertMode === 'overlay') return 'none'
+  return settings.alertMode
+}
+
 function AppInner() {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
   const { settings } = useSettings()
-  const posture = usePosture(settings.alertMode, settings.notificationFrequency)
+  const posture = usePosture(getEffectiveAlertMode(settings), settings.notificationFrequency)
 
   return (
     <Layout
