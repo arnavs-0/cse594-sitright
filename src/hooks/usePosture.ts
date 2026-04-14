@@ -8,6 +8,7 @@ import {
   AppSettings,
   ScoreExplanation,
   ScoreExplanationFactor,
+  SessionSummary,
 } from '../types'
 
 const CAPTURE_MS = 2500
@@ -16,6 +17,8 @@ const BUFFER_SIZE = 10
 const ISSUE_HISTORY_SIZE = 18
 const EXPLANATION_UPDATE_MS = 1200
 const EXPLANATION_ISSUE_WINDOW = 6
+const SESSION_SAMPLE_MS = 2000
+const SESSION_TIMELINE_LIMIT = 900
 
 // ============================================================================
 // 3D MODE
@@ -153,6 +156,38 @@ function averagePoseFeatures(samples: CaptureSample[]): PoseFeatures {
     shoulderTilt: averageFeature(samples, 'shoulderTilt'),
     headTilt: averageFeature(samples, 'headTilt'),
     shoulderRelaxation: averageFeature(samples, 'shoulderRelaxation'),
+  }
+}
+
+function averageSnapshotScore(samples: PostureSnapshot[]): number {
+  if (samples.length === 0) return 0
+  return samples.reduce((sum, sample) => sum + sample.score, 0) / samples.length
+}
+
+function summarizeSession(
+  startedAt: Date,
+  endedAt: Date,
+  timeline: PostureSnapshot[],
+  alerts: PostureAlert[],
+): SessionSummary {
+  const feedbackCounts = new Map<string, number>()
+  for (const alert of alerts) {
+    feedbackCounts.set(alert.message, (feedbackCounts.get(alert.message) ?? 0) + 1)
+  }
+
+  const commonFeedback = Array.from(feedbackCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([message, count]) => ({ message, count }))
+
+  return {
+    startedAt,
+    endedAt,
+    durationMs: Math.max(0, endedAt.getTime() - startedAt.getTime()),
+    averageScore: Math.round(averageSnapshotScore(timeline)),
+    timeline,
+    alerts,
+    commonFeedback,
   }
 }
 
@@ -861,7 +896,11 @@ export function usePosture(
   const [confidence, setConfidence] = useState(0)
   const [alerts, setAlerts] = useState<PostureAlert[]>([])
   const [timeline, setTimeline] = useState<PostureSnapshot[]>([])
-  const [sessionStart] = useState<Date>(new Date())
+  const [sessionStart, setSessionStart] = useState<Date | null>(null)
+  const [sessionTimeline, setSessionTimeline] = useState<PostureSnapshot[]>([])
+  const [sessionAlerts, setSessionAlerts] = useState<PostureAlert[]>([])
+  const [isSessionActive, setIsSessionActive] = useState(false)
+  const [lastSessionSummary, setLastSessionSummary] = useState<SessionSummary | null>(null)
   const [calibrationStep, setCalibrationStep] = useState<'good' | 'bad' | 'done'>('good')
   const [isCapturingCalibration, setIsCapturingCalibration] = useState(false)
   const [calibrationProgress, setCalibrationProgress] = useState(0)
@@ -984,6 +1023,28 @@ export function usePosture(
     setExplanation(createInitialExplanation())
     window.electronAPI?.hideOverlay()
   }, [])
+
+  const startSession = useCallback(() => {
+    const now = new Date()
+    setSessionStart(now)
+    setSessionTimeline([{ time: now, status, score }])
+    setSessionAlerts([])
+    setLastSessionSummary(null)
+    setIsSessionActive(true)
+  }, [score, status])
+
+  const stopSession = useCallback(() => {
+    if (!isSessionActive || !sessionStart) return
+    const endedAt = new Date()
+    const finalTimeline = [
+      ...sessionTimeline,
+      { time: endedAt, status, score },
+    ]
+    setLastSessionSummary(
+      summarizeSession(sessionStart, endedAt, finalTimeline, sessionAlerts),
+    )
+    setIsSessionActive(false)
+  }, [isSessionActive, score, sessionAlerts, sessionStart, sessionTimeline, status])
 
   const startCapture = useCallback((target: 'good' | 'bad') => {
     if (isCapturingCalibration) return
@@ -1226,6 +1287,9 @@ export function usePosture(
             message: randomMsg(decision.status),
           }
           setAlerts((prevAlerts) => [alert, ...prevAlerts].slice(0, 50))
+          if (isSessionActive) {
+            setSessionAlerts((prevAlerts) => [alert, ...prevAlerts].slice(0, 200))
+          }
           lastAlertTimeRef.current = nowMs
         }
 
@@ -1443,6 +1507,9 @@ export function usePosture(
           message: randomMsg(newStatus),
         }
         setAlerts((prev) => [alert, ...prev].slice(0, 50))
+        if (isSessionActive) {
+          setSessionAlerts((prev) => [alert, ...prev].slice(0, 200))
+        }
         lastAlertTimeRef.current = now
       }
     }
@@ -1462,7 +1529,7 @@ export function usePosture(
         lastBannerTimeRef.current = now
       }
     }
-  }, [alertMode, calibrationStep, confidence, isCapturingCalibration, notificationFrequency, status])
+  }, [alertMode, calibrationStep, confidence, isCapturingCalibration, isSessionActive, notificationFrequency, status])
 
   const detect = useCallback(() => {
     if (videoRef.current && isMonitoring && landmarkerRef.current) {
@@ -1499,13 +1566,23 @@ export function usePosture(
   useEffect(() => {
     const interval = setInterval(() => {
       if (!isMonitoring) return
-      setTimeline((prev) => [
-        ...prev.slice(-59),
-        { time: new Date(), status, score },
-      ])
+      const snapshot = { time: new Date(), status, score }
+      setTimeline((prev) => [...prev.slice(-59), snapshot])
     }, 10000)
     return () => clearInterval(interval)
   }, [isMonitoring, status, score])
+
+  useEffect(() => {
+    if (!isSessionActive) return
+
+    const interval = setInterval(() => {
+      if (!isMonitoring) return
+      const snapshot = { time: new Date(), status, score }
+      setSessionTimeline((prev) => [...prev.slice(-(SESSION_TIMELINE_LIMIT - 1)), snapshot])
+    }, SESSION_SAMPLE_MS)
+
+    return () => clearInterval(interval)
+  }, [isMonitoring, isSessionActive, score, status])
 
   return {
     status,
@@ -1513,14 +1590,20 @@ export function usePosture(
     confidence,
     alerts,
     timeline,
+    sessionTimeline,
+    sessionAlerts,
     isMonitoring,
+    isSessionActive,
     sessionStart,
+    lastSessionSummary,
     calibrationStep,
     isCapturingCalibration,
     calibrationProgress,
     explanation,
     metrics3D,
     landmarks3D,
+    startSession,
+    stopSession,
     toggleMonitoring: () => setIsMonitoring((prev) => !prev),
     setVideo: (video: HTMLVideoElement | null) => {
       videoRef.current = video

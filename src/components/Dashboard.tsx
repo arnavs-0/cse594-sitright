@@ -5,18 +5,26 @@ import AlertHistory from './AlertHistory'
 import CameraFeed from './CameraFeed'
 import CalibrationPanel from './CalibrationPanel'
 import ExplainableScore from './ExplainableScore'
-import { PostureStatus, PostureAlert, PostureSnapshot, ScoreExplanation } from '../types'
+import { PostureStatus, PostureAlert, PostureSnapshot, ScoreExplanation, SessionSummary } from '../types'
 import { useSettings } from '../hooks/useSettings'
+import { Landmark3D } from '../hooks/usePosture'
 
 interface DashboardProps {
   posture: {
     status: PostureStatus
     score: number
     confidence: number
+    landmarks3D: Landmark3D[]
     alerts: PostureAlert[]
     timeline: PostureSnapshot[]
     isMonitoring: boolean
-    sessionStart: Date
+    isSessionActive: boolean
+    sessionStart: Date | null
+    sessionTimeline: PostureSnapshot[]
+    sessionAlerts: PostureAlert[]
+    lastSessionSummary: SessionSummary | null
+    startSession: () => void
+    stopSession: () => void
     recalibrate: () => void
     calibrationStep: 'good' | 'bad' | 'done'
     isCapturingCalibration: boolean
@@ -64,9 +72,16 @@ export default function Dashboard({ posture, setVideo }: DashboardProps) {
         <div className="lg:col-span-2">
           <SessionStats
             sessionStart={posture.sessionStart}
+            status={posture.status}
             score={posture.score}
             alertCount={posture.alerts.length}
             isMonitoring={posture.isMonitoring}
+            isSessionActive={posture.isSessionActive}
+            sessionTimeline={posture.sessionTimeline}
+            sessionAlerts={posture.sessionAlerts}
+            lastSessionSummary={posture.lastSessionSummary}
+            onStartSession={posture.startSession}
+            onStopSession={posture.stopSession}
           />
         </div>
       </div>

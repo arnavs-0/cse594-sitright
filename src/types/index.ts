@@ -17,6 +17,21 @@ export interface PostureSnapshot {
   score: number
 }
 
+export interface SessionFeedbackItem {
+  message: string
+  count: number
+}
+
+export interface SessionSummary {
+  startedAt: Date
+  endedAt: Date
+  durationMs: number
+  averageScore: number
+  timeline: PostureSnapshot[]
+  alerts: PostureAlert[]
+  commonFeedback: SessionFeedbackItem[]
+}
+
 export interface ScoreExplanationFactor {
   label: string
   value: string
