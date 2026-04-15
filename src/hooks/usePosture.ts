@@ -125,9 +125,23 @@ function getNotificationIntervalMs(frequency: NotificationFrequency): number {
   return 5 * 60 * 1000
 }
 
-function randomMsg(status: PostureStatus): string {
-  const msgs = POSTURE_MESSAGES[status]
-  return msgs[Math.floor(Math.random() * msgs.length)]
+function compactExplanation(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function makeAlertCopyFromExplanation(status: PostureStatus, explanation: ScoreExplanation): Pick<PostureAlert, 'message' | 'detail' | 'action'> {
+  const headline =
+    status === 'bad'
+      ? explanation.title
+      : status === 'warning'
+        ? explanation.title
+        : 'Posture improved'
+
+  return {
+    message: compactExplanation(headline),
+    detail: compactExplanation(explanation.primaryReason),
+    action: compactExplanation(explanation.recommendation),
+  }
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -586,6 +600,15 @@ function createExplanation(
   }
 }
 
+function buildAlertCopy3D(m: Metrics3D, status: PostureStatus): Pick<PostureAlert, 'message' | 'detail' | 'action'> {
+  const explanation = buildExplanation3D(m, status)
+  return makeAlertCopyFromExplanation(status, explanation)
+}
+
+function buildAlertCopy2D(explanation: ScoreExplanation, status: PostureStatus): Pick<PostureAlert, 'message' | 'detail' | 'action'> {
+  return makeAlertCopyFromExplanation(status, explanation)
+}
+
 export type Metrics3D = {
   // Per-frame absolute angles. All four are invariant under rotation about
   // the y axis (chair-spinning), so they can be calibrated once and compared
@@ -819,6 +842,13 @@ function buildExplanation3D(m: Metrics3D, status: PostureStatus): ScoreExplanati
   const noseDev = m.nose_dev_deg
   const mouthDev = m.mouth_dev_deg
   const shDev = Math.abs(m.shoulder_slope_dev_deg)
+  const headSignals = [
+    { key: 'ears', dev: earDev, visible: m.ear_vis >= VIS_MIN },
+    { key: 'nose', dev: noseDev, visible: m.nose_vis >= VIS_MIN },
+    { key: 'mouth', dev: mouthDev, visible: m.mouth_vis >= VIS_MIN },
+  ].filter((signal) => signal.visible)
+  const strongestHeadSignal = headSignals.sort((a, b) => b.dev - a.dev)[0]
+  const dominantIssue = shDev > (strongestHeadSignal?.dev ?? 0) ? 'shoulders' : 'head'
 
   const headImpact = (dev: number, vis: number): ScoreExplanationFactor['impact'] => {
     if (vis < VIS_MIN) return 'neutral'
@@ -830,20 +860,36 @@ function buildExplanation3D(m: Metrics3D, status: PostureStatus): ScoreExplanati
     shDev > SHOULDER_DEV_BAD_DEG ? 'negative' : shDev > SHOULDER_DEV_WARN_DEG ? 'neutral' : 'positive'
 
   const title = status === 'good'
-    ? 'Posture steady'
-    : status === 'warning'
-      ? 'Posture drifting'
-      : 'Posture bad'
+    ? 'Your posture looks aligned again'
+    : dominantIssue === 'shoulders'
+      ? status === 'warning'
+        ? 'Your shoulders are starting to tilt'
+        : 'Your shoulder line is clearly uneven'
+      : status === 'warning'
+        ? 'Your head is starting to drift forward'
+        : 'Your head has moved well ahead of your shoulders'
 
-  const summary =
-    'Comparing each head feature angle against its calibrated upright baseline. Rotation-invariant under chair spinning; only changes in posture move these numbers.'
+  const summary = status === 'good'
+    ? 'You are back near the upright posture you calibrated.'
+    : dominantIssue === 'shoulders'
+      ? 'SitRight is seeing more shoulder tilt than in your upright baseline.'
+      : 'SitRight is seeing more forward head posture than in your upright baseline.'
 
-  const primaryReason =
-    `Per-feature deviations from upright. Head warn ${HEAD_DEV_WARN_DEG}°, bad ${HEAD_DEV_BAD_DEG}°. Shoulder warn ${SHOULDER_DEV_WARN_DEG}°, bad ${SHOULDER_DEV_BAD_DEG}°.`
+  const primaryReason = status === 'good'
+    ? 'Your head and shoulders currently look much closer to your upright baseline than to a slouched position.'
+    : dominantIssue === 'shoulders'
+      ? 'The shoulder line looks more tilted than usual, so SitRight is treating this as posture drift.'
+      : strongestHeadSignal?.key === 'nose'
+        ? 'Your nose position has moved farther forward than it did in your upright baseline.'
+        : strongestHeadSignal?.key === 'mouth'
+          ? 'The lower part of your face has shifted forward compared with your upright baseline.'
+          : 'The overall head position has shifted forward compared with your upright baseline.'
 
   const recommendation = status === 'good'
-    ? 'Hold this alignment.'
-    : 'Stack your head over your shoulders and level your shoulder line.'
+    ? 'Keep this position.'
+    : dominantIssue === 'shoulders'
+      ? 'Unshrug your shoulders and sit evenly before checking the score again.'
+      : 'Bring your chin slightly back and stack your head over your shoulders.'
 
   const fmt = (val: number, dev: number) =>
     `${val.toFixed(1)}° (Δ${dev >= 0 ? '+' : ''}${dev.toFixed(1)}°)`
@@ -880,8 +926,12 @@ function buildExplanation3D(m: Metrics3D, status: PostureStatus): ScoreExplanati
       },
     ],
     insights: [
-      `Head deviation: warn ${HEAD_DEV_WARN_DEG}°, bad ${HEAD_DEV_BAD_DEG}°. Shoulder: warn ${SHOULDER_DEV_WARN_DEG}°, bad ${SHOULDER_DEV_BAD_DEG}°.`,
-      'Per-frame values logged to console as "[3D]". Click Recalibrate to re-record baseline.',
+      status === 'good'
+        ? 'Your current posture is matching your personal upright baseline more closely again.'
+        : dominantIssue === 'shoulders'
+          ? 'This alert was triggered mainly by shoulder alignment rather than head position.'
+          : 'This alert was triggered mainly by head position rather than shoulder alignment.',
+      'If this keeps happening in your normal setup, recalibrating can make the feedback fit you better.',
     ],
   }
 }
@@ -1274,11 +1324,13 @@ export function usePosture(
       )
 
       // ---- Step 8: push to React state. ----
+      const explanationSnapshot = buildExplanation3D(m, decision.status)
+
       setMetrics3D(m)
       setScore(finalScore)
       setConfidence(95)
       if (decision.status !== status) setStatus(decision.status)
-      setExplanation(buildExplanation3D(m, decision.status))
+      setExplanation(explanationSnapshot)
 
       if (decision.status !== lastReportedStatusRef.current) {
         if (decision.status === 'good') {
@@ -1292,11 +1344,14 @@ export function usePosture(
       if (decision.status !== 'good') {
         const nowMs = Date.now()
         if (nowMs - lastAlertTimeRef.current > 15000) {
+          const alertCopy = buildAlertCopy3D(m, decision.status)
           const alert: PostureAlert = {
             id: nowMs.toString(),
             timestamp: new Date(),
             type: decision.status,
-            message: randomMsg(decision.status),
+            message: alertCopy.message,
+            detail: alertCopy.detail,
+            action: alertCopy.action,
           }
           setAlerts((prevAlerts) => [alert, ...prevAlerts].slice(0, 50))
           if (isSessionActive) {
@@ -1483,19 +1538,18 @@ export function usePosture(
     const explanationChanged =
       explanationRef.current.status !== newStatus || explanationRef.current.issue !== stableIssue
     const explanationDue = now - lastExplanationUpdateRef.current >= EXPLANATION_UPDATE_MS
+    const explanationSnapshot = createExplanation(
+      newStatus,
+      finalScore,
+      rawScore,
+      detectedConfidence,
+      profile,
+      smoothedFeatureRef.current ?? pose.features,
+      stableIssue ?? getTopRecurringIssue(issueHistoryRef.current),
+    )
 
     if (explanationChanged || explanationDue) {
-      setExplanation(
-        createExplanation(
-          newStatus,
-          finalScore,
-          rawScore,
-          detectedConfidence,
-          profile,
-          smoothedFeatureRef.current ?? pose.features,
-          stableIssue ?? getTopRecurringIssue(issueHistoryRef.current),
-        ),
-      )
+      setExplanation(explanationSnapshot)
       explanationRef.current = { status: newStatus, issue: stableIssue }
       lastExplanationUpdateRef.current = now
     }
@@ -1512,11 +1566,14 @@ export function usePosture(
     if (newStatus !== 'good') {
       const now = Date.now()
       if (now - lastAlertTimeRef.current > 15000) {
+        const alertCopy = buildAlertCopy2D(explanationSnapshot, newStatus)
         const alert: PostureAlert = {
           id: now.toString(),
           timestamp: new Date(),
           type: newStatus,
-          message: randomMsg(newStatus),
+          message: alertCopy.message,
+          detail: alertCopy.detail,
+          action: alertCopy.action,
         }
         setAlerts((prev) => [alert, ...prev].slice(0, 50))
         if (isSessionActive) {

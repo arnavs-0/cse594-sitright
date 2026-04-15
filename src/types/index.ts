@@ -9,6 +9,8 @@ export interface PostureAlert {
   timestamp: Date
   type: PostureStatus
   message: string
+  detail?: string
+  action?: string
 }
 
 export interface PostureSnapshot {

@@ -86,11 +86,17 @@ export default function AlertHistory({ alerts }: Props) {
           return (
             <div
               key={a.id}
-              className={`flex items-start gap-3 p-2.5 rounded-xl ${c.bg} transition-all duration-200`}
+              className={`flex items-start gap-3 p-3 rounded-xl ${c.bg} transition-all duration-200`}
             >
               <div className={`mt-0.5 ${c.color}`}>{c.icon}</div>
               <div className="flex-1 min-w-0">
-                <p className="text-xs text-slate-200 leading-snug">{a.message}</p>
+                <p className="text-sm text-slate-100 leading-snug">{a.message}</p>
+                {a.detail ? (
+                  <p className="text-xs text-slate-400 leading-relaxed mt-1">{a.detail}</p>
+                ) : null}
+                {a.action ? (
+                  <p className="text-xs text-cyan-300/90 leading-relaxed mt-1">Try this: {a.action}</p>
+                ) : null}
                 <p className="text-[10px] text-slate-500 mt-0.5">
                   {a.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} ·{' '}
                   {timeAgo(a.timestamp)}
