@@ -31,17 +31,3 @@ src/
   hooks/           Custom hooks (posture data integration point)
   types/           Shared TypeScript types
 ```
-
-## Demo Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| ⌘/Ctrl + 1 | Set posture → **Good** |
-| ⌘/Ctrl + 2 | Set posture → **Warning** |
-| ⌘/Ctrl + 3 | Set posture → **Bad** (triggers desktop notification) |
-
-## Integration
-
-The posture detection model plugs into `src/hooks/usePosture.ts`.
-Replace the `simulatePosture` callback with real detection data — the
-rest of the UI reads from the same hook interface automatically.
