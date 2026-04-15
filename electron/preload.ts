@@ -7,5 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('overlay-show', status),
   hideOverlay: () =>
     ipcRenderer.invoke('overlay-hide'),
+  isWindowVisible: () =>
+    ipcRenderer.invoke('window-is-visible'),
   platform: process.platform,
 })

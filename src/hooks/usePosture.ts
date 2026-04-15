@@ -17,6 +17,7 @@ const BUFFER_SIZE = 10
 const ISSUE_HISTORY_SIZE = 18
 const EXPLANATION_UPDATE_MS = 1200
 const EXPLANATION_ISSUE_WINDOW = 6
+const MIN_NOTIFICATION_REPEAT_MS = 30000
 const SESSION_SAMPLE_MS = 2000
 const SESSION_TIMELINE_LIMIT = 900
 
@@ -142,6 +143,39 @@ function makeAlertCopyFromExplanation(status: PostureStatus, explanation: ScoreE
     detail: compactExplanation(explanation.primaryReason),
     action: compactExplanation(explanation.recommendation),
   }
+}
+
+async function shouldSendCoachingNotification(alertMode: AlertMode): Promise<boolean> {
+  if (!window.electronAPI) return false
+  if (alertMode === 'banner' || alertMode === 'both') return true
+  if (alertMode !== 'overlay') return false
+
+  try {
+    const isVisible = await window.electronAPI.isWindowVisible()
+    return !isVisible
+  } catch {
+    return false
+  }
+}
+
+function getNotificationBody(alert: Pick<PostureAlert, 'message' | 'action'>): string {
+  if (alert.action) {
+    return `${alert.message}. Try this: ${alert.action}`
+  }
+  return alert.message
+}
+
+function canSendCoachingNotification(
+  lastTime: number,
+  now: number,
+  cooldownMs: number,
+  statusChanged: boolean,
+  sameBody: boolean,
+): boolean {
+  if (statusChanged) return true
+  const effectiveCooldown = Math.max(cooldownMs, MIN_NOTIFICATION_REPEAT_MS)
+  if (sameBody) return now - lastTime >= effectiveCooldown
+  return now - lastTime >= Math.max(cooldownMs, 15000)
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -971,6 +1005,7 @@ export function usePosture(
   const issueHistoryRef = useRef<FeatureKey[]>([])
   const explanationIssueHistoryRef = useRef<Array<FeatureKey | null>>([])
   const smoothedFeatureRef = useRef<PoseFeatures | null>(null)
+  const lastNotificationBodyRef = useRef('')
   // EMA for the 2D-mode forwardHead value. forwardHead is the rotation-
   // invariant 3D ear angle (in degrees) and has a per-frame noise floor of
   // ~1-3°. Because severity is asymmetric (only positive deviations from the
@@ -1065,6 +1100,7 @@ export function usePosture(
     issueHistoryRef.current = []
     explanationIssueHistoryRef.current = []
     smoothedFeatureRef.current = null
+    lastNotificationBodyRef.current = ''
     smoothedForwardHeadRef.current = null
     explanationRef.current = { status: 'good', issue: null }
     lastExplanationUpdateRef.current = 0
@@ -1331,8 +1367,9 @@ export function usePosture(
       setConfidence(95)
       if (decision.status !== status) setStatus(decision.status)
       setExplanation(explanationSnapshot)
+      const statusChanged = decision.status !== lastReportedStatusRef.current
 
-      if (decision.status !== lastReportedStatusRef.current) {
+      if (statusChanged) {
         if (decision.status === 'good') {
           window.electronAPI?.hideOverlay()
         } else if (alertMode === 'overlay' || alertMode === 'both') {
@@ -1360,17 +1397,19 @@ export function usePosture(
           lastAlertTimeRef.current = nowMs
         }
 
-        if (window.electronAPI && (alertMode === 'banner' || alertMode === 'both')) {
+        if (window.electronAPI) {
           const nowBanner = Date.now()
           const cooldownMs = getNotificationIntervalMs(notificationFrequency)
-          if (cooldownMs === 0 || nowBanner - lastBannerTimeRef.current >= cooldownMs) {
-            const body =
-              decision.status === 'bad'
-                ? 'Head deviation from upright baseline exceeded the bad threshold.'
-                : 'Posture drifting from upright baseline.'
-            window.electronAPI.sendNotification('SitRight — Posture Alert', body)
-            lastBannerTimeRef.current = nowBanner
-          }
+          const alertCopy = buildAlertCopy3D(m, decision.status)
+          const body = getNotificationBody(alertCopy)
+          const sameBody = body === lastNotificationBodyRef.current
+          void shouldSendCoachingNotification(alertMode).then((shouldNotify) => {
+            if (shouldNotify && canSendCoachingNotification(lastBannerTimeRef.current, nowBanner, cooldownMs, statusChanged, sameBody)) {
+              window.electronAPI?.sendNotification('SitRight — Posture Alert', body)
+              lastBannerTimeRef.current = nowBanner
+              lastNotificationBodyRef.current = body
+            }
+          })
         }
       }
 
@@ -1441,6 +1480,7 @@ export function usePosture(
           issueHistoryRef.current = []
           explanationIssueHistoryRef.current = []
           smoothedFeatureRef.current = pose.features
+          lastNotificationBodyRef.current = ''
           explanationRef.current = { status: 'good', issue: null }
           lastExplanationUpdateRef.current = Date.now()
           statusHistoryRef.current = []
@@ -1554,7 +1594,8 @@ export function usePosture(
       lastExplanationUpdateRef.current = now
     }
 
-    if (newStatus !== lastReportedStatusRef.current) {
+    const statusChanged = newStatus !== lastReportedStatusRef.current
+    if (statusChanged) {
       if (newStatus === 'good') {
         window.electronAPI?.hideOverlay()
       } else if (alertMode === 'overlay' || alertMode === 'both') {
@@ -1583,20 +1624,19 @@ export function usePosture(
       }
     }
 
-    if (newStatus !== 'good' && window.electronAPI && (alertMode === 'banner' || alertMode === 'both')) {
+    if (newStatus !== 'good' && window.electronAPI) {
       const now = Date.now()
       const cooldownMs = getNotificationIntervalMs(notificationFrequency)
-      const statusChanged = newStatus !== lastReportedStatusRef.current
-      const cooldownElapsed = cooldownMs === 0 || now - lastBannerTimeRef.current >= cooldownMs
-
-      if (statusChanged || cooldownElapsed) {
-        const body =
-          newStatus === 'bad'
-            ? 'Personalized posture model detected sustained drift. Sit back and reset your shoulders.'
-            : 'Posture drift detected. Make a small adjustment and let the score settle.'
-        window.electronAPI.sendNotification('SitRight — Posture Alert', body)
-        lastBannerTimeRef.current = now
-      }
+      const alertCopy = buildAlertCopy2D(explanationSnapshot, newStatus)
+      const body = getNotificationBody(alertCopy)
+      const sameBody = body === lastNotificationBodyRef.current
+      void shouldSendCoachingNotification(alertMode).then((shouldNotify) => {
+        if (shouldNotify && canSendCoachingNotification(lastBannerTimeRef.current, now, cooldownMs, statusChanged, sameBody)) {
+          window.electronAPI?.sendNotification('SitRight — Posture Alert', body)
+          lastBannerTimeRef.current = now
+          lastNotificationBodyRef.current = body
+        }
+      })
     }
   }, [alertMode, calibrationStep, confidence, isCapturingCalibration, isSessionActive, notificationFrequency, status])
 

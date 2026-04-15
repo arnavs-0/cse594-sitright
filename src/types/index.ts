@@ -68,6 +68,7 @@ export interface ElectronAPI {
   sendNotification: (title: string, body: string) => Promise<void>
   showOverlay: (status: string) => Promise<void>
   hideOverlay: () => Promise<void>
+  isWindowVisible: () => Promise<boolean>
   platform: string
 }
 

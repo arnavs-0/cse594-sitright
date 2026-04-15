@@ -10,8 +10,20 @@ let win: BrowserWindow | null = null
 let overlayWin: BrowserWindow | null = null
 let tray: Tray | null = null
 let isQuitting = false
+let currentOverlayStatus: 'warning' | 'bad' | 'hide' = 'hide'
+let overlayReady = false
 
 const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
+
+function syncOverlayVisibility() {
+  if (!overlayWin || overlayWin.isDestroyed() || !overlayReady) return
+
+  const shouldShowOverlay =
+    currentOverlayStatus !== 'hide' &&
+    (!win || win.isDestroyed() || !win.isVisible() || !win.isFocused())
+
+  overlayWin.webContents.send('overlay-update', shouldShowOverlay ? currentOverlayStatus : 'hide')
+}
 
 function createWindow() {
   win = new BrowserWindow({
@@ -23,6 +35,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
     },
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#0f172a',
@@ -31,15 +44,29 @@ function createWindow() {
 
   win.once('ready-to-show', () => {
     win?.show()
+    syncOverlayVisibility()
   })
 
-  // Minimize to tray instead of closing
+  // Minimize to tray instead of leaving the app in the dock/taskbar.
+  win.on('minimize', (event) => {
+    event.preventDefault()
+    win?.hide()
+    syncOverlayVisibility()
+  })
+
+  // Close also hides to tray unless the user is explicitly quitting.
   win.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault()
       win?.hide()
+      syncOverlayVisibility()
     }
   })
+
+  win.on('show', syncOverlayVisibility)
+  win.on('hide', syncOverlayVisibility)
+  win.on('focus', syncOverlayVisibility)
+  win.on('blur', syncOverlayVisibility)
 
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
@@ -62,6 +89,7 @@ function createTray() {
       click: () => {
         win?.show()
         win?.focus()
+        syncOverlayVisibility()
       },
     },
     { type: 'separator' },
@@ -80,6 +108,7 @@ function createTray() {
   tray.on('click', () => {
     win?.show()
     win?.focus()
+    syncOverlayVisibility()
   })
 }
 
@@ -117,8 +146,15 @@ function createOverlay() {
     ? path.join(process.env.DIST!, 'overlay.html')
     : path.join(process.env.VITE_PUBLIC!, 'overlay.html')
   overlayWin.loadFile(overlayPath)
+  overlayReady = false
+
+  overlayWin.webContents.on('did-finish-load', () => {
+    overlayReady = true
+    syncOverlayVisibility()
+  })
 
   overlayWin.on('closed', () => {
+    overlayReady = false
     overlayWin = null
   })
 }
@@ -132,15 +168,18 @@ ipcMain.handle('send-notification', (_event, title: string, body: string) => {
 
 // IPC: overlay glow
 ipcMain.handle('overlay-show', (_event, status: string) => {
-  if (overlayWin && !overlayWin.isDestroyed()) {
-    overlayWin.webContents.send('overlay-update', status)
-  }
+  currentOverlayStatus = status === 'bad' ? 'bad' : 'warning'
+  syncOverlayVisibility()
 })
 
 ipcMain.handle('overlay-hide', () => {
-  if (overlayWin && !overlayWin.isDestroyed()) {
-    overlayWin.webContents.send('overlay-update', 'hide')
-  }
+  currentOverlayStatus = 'hide'
+  syncOverlayVisibility()
+})
+
+ipcMain.handle('window-is-visible', () => {
+  if (!win || win.isDestroyed()) return false
+  return win.isVisible()
 })
 
 app.on('before-quit', () => {
@@ -164,5 +203,7 @@ app.on('activate', () => {
     createWindow()
   } else {
     win?.show()
+    win?.focus()
+    syncOverlayVisibility()
   }
 })
