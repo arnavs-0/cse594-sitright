@@ -1506,12 +1506,13 @@ export function usePosture(
     const ratio = pose.legacyMetric / baselineRef.current
     const issues = buildIssueAnalyses(pose.features, profile).sort((a, b) => b.severity - a.severity)
 
-    // Yaw gate. When the user is facing the camera, all six features vote via
-    // the existing weighted sum + 25% legacy blend. When the user is rotated
-    // past YAW_HIGH_DEG, the 2D pixel features (headLift, torsoLean, the two
-    // tilts, shoulderRelaxation) become unreliable. The score collapses to
-    // forwardHead severity alone — which is the rotation-invariant 3D
-    // ear-angle metric — and the legacy ratio (also pixel-based) is dropped.
+    // Yaw gate. When the user is facing the camera, all calibrated features
+    // vote via the weighted sum. The old legacy head-lift ratio was still
+    // dragging the score downward even when the multi-metric score looked
+    // excellent, which caused the "perfect posture slowly slipping" feel.
+    // When the user rotates past YAW_HIGH_DEG, the classifier still falls
+    // back to forwardHead-only because the other 2D features become less
+    // reliable in profile.
     const yawHigh = pose.bodyRotationDeg >= YAW_HIGH_DEG
     let featureScore: number
     if (yawHigh) {
@@ -1522,23 +1523,20 @@ export function usePosture(
       const weightedPenalty = issues.reduce((sum, issue) => sum + issue.severity * FEATURE_WEIGHTS[issue.key], 0)
       featureScore = clampPercent((1 - clamp(weightedPenalty, 0, 1)) * 100)
     }
-    const legacyScore = clampPercent(((ratio - profile.badThreshold) / (1 - profile.badThreshold)) * 100)
-    const rawScore = yawHigh
-      ? featureScore
-      : clampPercent(featureScore * 0.75 + legacyScore * 0.25)
-
-    let rawStatus: PostureStatus = 'good'
-    if (ratio < profile.badThreshold || rawScore < 50) {
-      rawStatus = 'bad'
-    } else if (ratio < profile.warningThreshold || rawScore < 75) {
-      rawStatus = 'warning'
-    }
+    const rawScore = featureScore
 
     smoothedScoreRef.current = smoothedScoreRef.current * 0.7 + rawScore * 0.3
     const finalScore = Math.round(smoothedScoreRef.current)
     setScore(finalScore)
 
-    statusHistoryRef.current.push(rawStatus)
+    let scoreStatus: PostureStatus = 'good'
+    if (finalScore < 55) {
+      scoreStatus = 'bad'
+    } else if (finalScore < 80) {
+      scoreStatus = 'warning'
+    }
+
+    statusHistoryRef.current.push(scoreStatus)
     if (statusHistoryRef.current.length > BUFFER_SIZE) {
       statusHistoryRef.current.shift()
     }
@@ -1560,7 +1558,9 @@ export function usePosture(
     const allPoor = lastThree.length === 3 && lastThree.every((value) => value === 'warning' || value === 'bad')
 
     let newStatus: PostureStatus = status
-    if (allBad) {
+    if (finalScore >= 92) {
+      newStatus = 'good'
+    } else if (allBad) {
       newStatus = 'bad'
     } else if (allPoor && status !== 'bad') {
       newStatus = 'warning'
